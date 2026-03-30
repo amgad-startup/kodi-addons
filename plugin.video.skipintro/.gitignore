@@ -1,0 +1,11 @@
+# Exclude virtual environment and VSCode settings
+.venv/
+.vscode/
+video_metadata_extract.txt
+.aider*
+plugin.video.skipintro.code-workspace
+dev-setup.sh
+build.sh
+__pycache__/
+resources/lib/reload.py
+ffmpeg-test.py

@@ -1,0 +1,50 @@
+2024-11-29 18:29:16 - stream_processor - INFO - StreamProcessor init with max_titles=None, fresh_run=True, max_episodes=None, mode=local, name_filter=None
+2024-11-29 18:29:16 - processors.series_processor - INFO - SeriesProcessor init with max_titles=None, fresh_run=True, max_episodes=None, mode=local
+2024-11-29 18:29:16 - stream_processor - INFO - Cleaning content directory: /Volumes/sweetpi_share/wetv_library
+2024-11-29 18:29:27 - stream_processor - INFO - Creating content directory: /Volumes/sweetpi_share/wetv_library
+2024-11-29 18:29:27 - stream_processor - INFO - Creating directory for live_streams: /Volumes/sweetpi_share/wetv_library/live-tv
+2024-11-29 18:29:27 - stream_processor - INFO - Creating directory for vod: /Volumes/sweetpi_share/wetv_library/movies
+2024-11-29 18:29:27 - stream_processor - INFO - Creating directory for series: /Volumes/sweetpi_share/wetv_library/tv-shows
+2024-11-29 18:29:43 - stream_processor - INFO - StreamProcessor init with max_titles=None, fresh_run=True, max_episodes=None, mode=local, name_filter=None
+2024-11-29 18:29:43 - processors.series_processor - INFO - SeriesProcessor init with max_titles=None, fresh_run=True, max_episodes=None, mode=local
+2024-11-29 18:29:43 - stream_processor - INFO - Cleaning content directory: /Volumes/sweetpi_share/wetv_library
+2024-11-29 18:29:43 - stream_processor - INFO - Creating content directory: /Volumes/sweetpi_share/wetv_library
+2024-11-29 18:29:44 - stream_processor - INFO - Creating directory for series: /Volumes/sweetpi_share/wetv_library/tv-shows
+2024-11-29 18:29:47 - stream_processor - INFO - StreamProcessor init with max_titles=None, fresh_run=True, max_episodes=None, mode=local, name_filter=None
+2024-11-29 18:29:47 - processors.series_processor - INFO - SeriesProcessor init with max_titles=None, fresh_run=True, max_episodes=None, mode=local
+2024-11-29 18:29:47 - stream_processor - INFO - Cleaning content directory: /Volumes/sweetpi_share/wetv_library
+2024-11-29 18:29:47 - stream_processor - INFO - Creating content directory: /Volumes/sweetpi_share/wetv_library
+2024-11-29 18:29:47 - stream_processor - INFO - Creating directory for series: /Volumes/sweetpi_share/wetv_library/tv-shows
+2024-11-29 18:29:47 - stream_processor - INFO - Creating directory for vod: /Volumes/sweetpi_share/wetv_library/movies
+2024-11-29 18:29:49 - stream_processor - INFO - 
+Starting batch processing:
+2024-11-29 18:29:49 - stream_processor - INFO - Stream type: series
+2024-11-29 18:29:49 - stream_processor - INFO - Output folder: /Volumes/sweetpi_share/wetv_library/tv-shows
+2024-11-29 18:29:49 - stream_processor - INFO - Number of streams: 3966
+2024-11-29 18:29:49 - stream_processor - INFO - 
+Catalog comparison for series:
+2024-11-29 18:29:49 - stream_processor - INFO - Previous catalog from: 2024-11-29 18:29:49
+2024-11-29 18:29:49 - stream_processor - INFO - Streams: 3966 (Previously: 3966)
+2024-11-29 18:29:49 - stream_processor - INFO - Categories: 37 (Previously: 37)
+2024-11-29 18:29:49 - stream_processor - INFO - 
+Found 1684 streams matching Arabic filter for series
+2024-11-29 18:29:49 - stream_processor - INFO - Processing all 1684 matching streams
+2024-11-29 21:57:29 - stream_processor - ERROR - 
+Error processing stream إكس لانس: [Errno 60] Operation timed out: '/Volumes/sweetpi_share/wetv_library/tv-shows/إكس لانس/Season 01'
+2024-11-29 22:21:22 - stream_processor - ERROR - 
+Error processing stream رسالة الإمام: unsupported operand type(s) for -: 'NoneType' and 'int'
+2024-11-29 23:16:00 - stream_processor - INFO - StreamProcessor init with max_titles=None, fresh_run=False, max_episodes=None, mode=local, name_filter=None
+2024-11-29 23:16:00 - processors.series_processor - INFO - SeriesProcessor init with max_titles=None, fresh_run=False, max_episodes=None, mode=local
+2024-11-29 23:16:02 - stream_processor - INFO - 
+Starting batch processing:
+2024-11-29 23:16:02 - stream_processor - INFO - Stream type: series
+2024-11-29 23:16:02 - stream_processor - INFO - Output folder: /Volumes/sweetpi_share/wetv_library/tv-shows
+2024-11-29 23:16:02 - stream_processor - INFO - Number of streams: 3966
+2024-11-29 23:16:02 - stream_processor - INFO - 
+Catalog comparison for series:
+2024-11-29 23:16:02 - stream_processor - INFO - Previous catalog from: 2024-11-29 23:16:02
+2024-11-29 23:16:02 - stream_processor - INFO - Streams: 3966 (Previously: 3966)
+2024-11-29 23:16:02 - stream_processor - INFO - Categories: 37 (Previously: 37)
+2024-11-29 23:16:02 - stream_processor - INFO - 
+Found 1684 streams matching Arabic filter for series
+2024-11-29 23:16:02 - stream_processor - INFO - Processing all 1684 matching streams

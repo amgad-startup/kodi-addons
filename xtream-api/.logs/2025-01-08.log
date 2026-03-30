@@ -1,0 +1,36 @@
+2025-01-08 15:42:07 - __main__ - ERROR - Authentication failed
+2025-01-08 15:44:15 - __main__ - ERROR - Authentication failed
+2025-01-08 15:45:55 - __main__ - DEBUG - Starting with arguments:
+2025-01-08 15:45:55 - __main__ - DEBUG - Max titles per type: 10
+2025-01-08 15:45:56 - __main__ - DEBUG - Max episodes per series: unlimited
+2025-01-08 15:45:56 - __main__ - DEBUG - Timeout: 10
+2025-01-08 15:45:57 - __main__ - DEBUG - Types: ['vod']
+2025-01-08 15:45:57 - __main__ - DEBUG - Mode: Resume
+2025-01-08 15:45:59 - __main__ - DEBUG - Operation mode: local
+2025-01-08 15:46:03 - __main__ - DEBUG - Full arguments: Namespace(max_titles=10, max_episodes=None, timeout=10, types=['vod'], skip_series=False, clear_files=False, clear_cache=False, name=None, mode='local', retry_failed=False, interactive=False, debug=True)
+2025-01-08 15:47:12 - __main__ - ERROR - Authentication failed
+2025-01-08 15:47:45 - __main__ - DEBUG - Starting with arguments:
+2025-01-08 15:47:45 - __main__ - DEBUG - Max titles per type: 10
+2025-01-08 15:47:45 - __main__ - DEBUG - Max episodes per series: unlimited
+2025-01-08 15:47:45 - __main__ - DEBUG - Timeout: 10
+2025-01-08 15:47:45 - __main__ - DEBUG - Types: ['vod']
+2025-01-08 15:47:45 - __main__ - DEBUG - Mode: Resume
+2025-01-08 15:47:45 - __main__ - DEBUG - Operation mode: local
+2025-01-08 15:47:45 - __main__ - DEBUG - Full arguments: Namespace(max_titles=10, max_episodes=None, timeout=10, types=['vod'], skip_series=False, clear_files=False, clear_cache=False, name=None, mode='local', retry_failed=False, interactive=False, debug=True)
+2025-01-08 15:50:52 - __main__ - ERROR - Authentication failed
+2025-01-08 15:51:01 - __main__ - DEBUG - Starting with arguments:
+2025-01-08 15:51:01 - __main__ - DEBUG - Max titles per type: 10
+2025-01-08 15:51:01 - __main__ - DEBUG - Max episodes per series: unlimited
+2025-01-08 15:51:01 - __main__ - DEBUG - Timeout: 10
+2025-01-08 15:51:01 - __main__ - DEBUG - Types: ['vod']
+2025-01-08 15:51:01 - __main__ - DEBUG - Mode: Resume
+2025-01-08 15:51:01 - __main__ - DEBUG - Operation mode: local
+2025-01-08 15:51:01 - __main__ - DEBUG - Full arguments: Namespace(max_titles=10, max_episodes=None, timeout=10, types=['vod'], skip_series=False, clear_files=False, clear_cache=False, name=None, mode='local', retry_failed=False, interactive=False, debug=True)
+2025-01-08 15:58:07 - __main__ - DEBUG - Starting with arguments:
+2025-01-08 15:58:07 - __main__ - DEBUG - Max titles per type: 10
+2025-01-08 15:58:07 - __main__ - DEBUG - Max episodes per series: unlimited
+2025-01-08 15:58:07 - __main__ - DEBUG - Timeout: 10
+2025-01-08 15:58:07 - __main__ - DEBUG - Types: ['vod']
+2025-01-08 15:58:07 - __main__ - DEBUG - Mode: Resume
+2025-01-08 15:58:07 - __main__ - DEBUG - Operation mode: local
+2025-01-08 15:58:07 - __main__ - DEBUG - Full arguments: Namespace(max_titles=10, max_episodes=None, timeout=10, types=['vod'], skip_series=False, clear_files=False, clear_cache=False, name=None, mode='local', retry_failed=False, interactive=False, debug=True)

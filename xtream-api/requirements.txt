@@ -1,0 +1,5 @@
+requests>=2.31.0
+tqdm>=4.65.0
+urllib3>=2.0.3
+python-dotenv>=1.0.0  # Note: This is python-dotenv, not dotenv
+psutil>=5.9.0  # Required for checking Kodi process status to prevent database corruption

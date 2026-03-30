@@ -1,0 +1,56 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Environment Variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# State files
+editor_state.json
+
+# Database
+cache.db
+cache.db-journal
+
+# Logs
+*.log
+
+# Sample responses
+samples/
+not_found_shows.json
+not_found_shows.json
+.DS_Store
+tvshows-categories.json
+tvshows-shows.json
+not_found_shows.json
+not_found_shows.json
