@@ -1,0 +1,50 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Review PR
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # Get the diff for review
+          git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} > /tmp/pr-diff.txt
+
+          # Run Claude Code review
+          claude -p "You are a code reviewer. Review this pull request diff and provide:
+          1. A brief summary of the changes
+          2. Any bugs or issues found
+          3. Suggestions for improvement
+          4. Security concerns if any
+
+          Be concise. Only flag real issues, not style nitpicks.
+
+          PR Title: ${{ github.event.pull_request.title }}
+
+          Diff:
+          $(cat /tmp/pr-diff.txt)" --output-format text > /tmp/review.txt
+
+          echo "## Claude Code Review" > /tmp/comment.md
+          echo "" >> /tmp/comment.md
+          cat /tmp/review.txt >> /tmp/comment.md
+
+          # Post review as PR comment via Forgejo API
+          COMMENT_BODY=$(cat /tmp/comment.md | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\": ${COMMENT_BODY}}" \
+            "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments"
