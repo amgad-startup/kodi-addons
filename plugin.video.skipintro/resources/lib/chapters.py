@@ -1,3 +1,6 @@
+import os
+import shutil
+
 import xbmc
 import json
 import subprocess
@@ -5,11 +8,10 @@ from typing import List, Dict, Union
 
 class ChapterManager:
     """Manages chapter detection for video files using FFmpeg."""
-    
+
     def __init__(self):
         self._cached_chapters = {}
-        # On macOS, ffmpeg is typically installed in /usr/local/bin
-        self._ffmpeg_path = "/usr/local/bin/ffmpeg"
+        self._ffmpeg_path = shutil.which('ffmpeg') or '/usr/local/bin/ffmpeg'
     
     def get_chapters(self) -> List[Dict[str, Union[str, int, float]]]:
         """Get chapter information using ffmpeg."""
@@ -32,13 +34,24 @@ class ChapterManager:
             current_file = result['result']['item'].get('file')
             if not current_file:
                 return []
-            
+
+            # Only process local files — skip network streams to avoid
+            # ffmpeg protocol exploitation (smb://, http://, concat:, etc.)
+            if '://' in current_file:
+                xbmc.log('SkipIntro: Skipping chapter detection for non-local file', xbmc.LOGINFO)
+                return []
+
             # Return cached chapters if available
             if current_file in self._cached_chapters:
                 return self._cached_chapters[current_file]
-            
-            # Get chapter metadata using ffmpeg
-            cmd = [self._ffmpeg_path, "-i", current_file, "-f", "ffmetadata", "-"]
+
+            if not os.path.isfile(current_file):
+                xbmc.log(f'SkipIntro: File not found for chapter detection: {os.path.basename(current_file)}', xbmc.LOGWARNING)
+                return []
+
+            # Get chapter metadata using ffmpeg with restricted protocol access
+            cmd = [self._ffmpeg_path, "-protocol_whitelist", "file,pipe",
+                   "-i", current_file, "-f", "ffmetadata", "-"]
             
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)

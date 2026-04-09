@@ -46,8 +46,8 @@ class ShowMetadata:
         try:
             if xbmc.Player().isPlaying():
                 return xbmc.Player().getPlayingFile()
-        except:
-            pass
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Error getting filename: {str(e)}', xbmc.LOGERROR)
         return None
     
     def _parse_filename(self, filename):

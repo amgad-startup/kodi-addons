@@ -84,4 +84,4 @@ class PlayerUI:
 
     def show_notification(self, message, time=5000):
         """Show a notification message"""
-        xbmc.executebuiltin(f'Notification(SkipIntro,{message},{time})')
+        xbmcgui.Dialog().notification('SkipIntro', str(message), xbmcgui.NOTIFICATION_INFO, time)

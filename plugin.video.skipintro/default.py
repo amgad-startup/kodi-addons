@@ -1,18 +1,10 @@
-# Add these lines at the very beginning of default.py, before any other imports
-try:
-    import ptvsd
-    ptvsd.enable_attach(address=('localhost', 5678))
-    # If you want the script to wait for the debugger to attach, uncomment next line
-    # ptvsd.wait_for_attach()
-except:
-    pass
+import os
+import time
 
 import xbmc
 import xbmcaddon
 import xbmcgui
 import xbmcvfs
-import os
-import time
 
 from resources.lib.settings import Settings
 from resources.lib.chapters import ChapterManager
@@ -176,7 +168,7 @@ class SkipIntroPlayer(xbmc.Player):
             return
             
         playing_file = self.getPlayingFile()
-        xbmc.log(f'SkipIntro: Detecting show for file: {playing_file}', xbmc.LOGINFO)
+        xbmc.log(f'SkipIntro: Detecting show for file: {os.path.basename(playing_file)}', xbmc.LOGINFO)
             
         self.show_info = self.metadata.get_show_info()
         if self.show_info:
@@ -451,8 +443,8 @@ def main():
         try:
             player.cleanup()
             xbmc.log('SkipIntro: Service stopped', xbmc.LOGINFO)
-        except:
-            pass  # Ensure we don't hang during cleanup
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Error during cleanup: {str(e)}', xbmc.LOGERROR)
 
 if __name__ == '__main__':
     main()

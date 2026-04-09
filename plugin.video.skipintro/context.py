@@ -59,9 +59,9 @@ def get_time_input(dialog, prompt, default='', required=True):
             if len(parts) == 2:
                 minutes = int(parts[0])
                 seconds = int(parts[1])
-                if seconds < 60:
+                if 0 <= minutes <= 999 and 0 <= seconds < 60:
                     return time_str  # Return the original formatted string
-        except:
+        except (ValueError, IndexError):
             pass
         
         if dialog.yesno('Skip Intro', 'Invalid time format. Try again?'):
@@ -138,14 +138,23 @@ def get_chapter_selection(dialog):
     if not intro_start:
         return None
     intro_start = int(intro_start)
+    if intro_start < 1:
+        dialog.notification('Skip Intro', 'Chapter number must be positive', xbmcgui.NOTIFICATION_ERROR)
+        return None
 
     intro_end = dialog.numeric(0, 'Enter Intro End Chapter Number', '')
     if not intro_end:
         return None
     intro_end = int(intro_end)
+    if intro_end < 1 or intro_end <= intro_start:
+        dialog.notification('Skip Intro', 'End chapter must be after start chapter', xbmcgui.NOTIFICATION_ERROR)
+        return None
 
     outro_start = dialog.numeric(0, 'Enter Outro Start Chapter Number (Optional)', '')
     outro_start = int(outro_start) if outro_start else None
+    if outro_start is not None and outro_start < 1:
+        dialog.notification('Skip Intro', 'Chapter number must be positive', xbmcgui.NOTIFICATION_ERROR)
+        return None
 
     return {
         'use_chapters': True,

@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import os
 import xbmc
@@ -62,12 +63,20 @@ class ShowDatabase:
         except Exception as e:
             xbmc.log(f'SkipIntro: Database migration error: {str(e)}', xbmc.LOGERROR)
 
+    @staticmethod
+    def _validate_identifier(name):
+        """Validate SQL identifier to prevent injection."""
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
+            raise ValueError(f"Invalid SQL identifier: {name}")
+        return name
+
     def _migrate_table(self, cursor, table_name, columns, additional_sql=''):
         """Migrate a single table"""
+        table_name = self._validate_identifier(table_name)
         xbmc.log(f'SkipIntro: Migrating {table_name} table', xbmc.LOGINFO)
-        
+
         # Check if the table exists
-        cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
         table_exists = cursor.fetchone() is not None
 
         if table_exists:
@@ -77,6 +86,7 @@ class ShowDatabase:
             
             # Add missing columns
             for col_name, col_type in columns.items():
+                col_name = self._validate_identifier(col_name)
                 if col_name not in existing_columns:
                     cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}")
         else:
