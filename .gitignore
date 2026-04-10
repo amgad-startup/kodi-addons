@@ -13,3 +13,7 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+
+# Dev utilities (not part of the addon)
+**/reload.py
+**/clear_configs.py

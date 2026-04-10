@@ -10,6 +10,8 @@ import sys
 import xbmc
 from resources.lib.database_manager import DatabaseManager
 
+ALLOWED_ACTIONS = {'backup', 'restore', 'export', 'import'}
+
 
 def main():
     """Main entry point for database tools"""
@@ -20,6 +22,10 @@ def main():
             return
 
         action = sys.argv[1]
+        if action not in ALLOWED_ACTIONS:
+            xbmc.log('SkipIntro: Unknown database action', xbmc.LOGERROR)
+            return
+
         xbmc.log(f'SkipIntro: Database tools action: {action}', xbmc.LOGINFO)
 
         # Pass explicit addon ID since RunScript doesn't set addon context
@@ -33,8 +39,6 @@ def main():
             manager.export_to_json()
         elif action == 'import':
             manager.import_from_json()
-        else:
-            xbmc.log(f'SkipIntro: Unknown database action: {action}', xbmc.LOGERROR)
 
     except Exception as e:
         xbmc.log(f'SkipIntro: Database tools error: {str(e)}', xbmc.LOGERROR)

@@ -75,13 +75,24 @@ class ChapterManager:
         """Check if a file is an MKV by extension."""
         return filepath.lower().rstrip('/').endswith(('.mkv', '.webm'))
 
+    # Limits for enzyme parsing safety
+    MAX_CHAPTERS = 100
+    MAX_CHAPTER_NAME_LEN = 200
+
     def _get_chapters_enzyme(self, filepath: str) -> List[Dict]:
-        """Parse MKV chapters using enzyme via Kodi VFS (works with SMB/NFS)."""
+        """Parse MKV chapters using enzyme via Kodi VFS (works with SMB/NFS).
+
+        Guarded against malicious MKV files: catches MemoryError (crafted
+        element sizes), RecursionError (deeply nested EBML), and general
+        exceptions (infinite loops hit the VFS EOF and raise ReadError).
+        """
         try:
-            xbmc.log(f'SkipIntro: Attempting enzyme MKV chapter parse', xbmc.LOGINFO)
+            xbmc.log('SkipIntro: Attempting enzyme MKV chapter parse', xbmc.LOGINFO)
 
             class VFSFileWrapper:
-                """Wrapper to make xbmcvfs.File compatible with enzyme."""
+                """Wrapper to make xbmcvfs.File compatible with enzyme.
+                Includes bounds checking to prevent reads/seeks past EOF.
+                """
                 def __init__(self, vfs_file):
                     self._file = vfs_file
                     self._size = vfs_file.size()
@@ -89,10 +100,19 @@ class ChapterManager:
                 def read(self, size=-1):
                     if size == -1:
                         remaining = self._size - self._file.tell()
+                        if remaining <= 0:
+                            return b''
                         return self._file.readBytes(remaining)
-                    return self._file.readBytes(size)
+                    # Clamp read size to remaining bytes
+                    remaining = self._size - self._file.tell()
+                    safe_size = max(0, min(size, remaining))
+                    if safe_size == 0:
+                        return b''
+                    return self._file.readBytes(safe_size)
 
                 def seek(self, offset, whence=0):
+                    if whence == 0 and offset > self._size:
+                        offset = self._size
                     return self._file.seek(offset, whence)
 
                 def tell(self):
@@ -101,17 +121,26 @@ class ChapterManager:
             vfs_file = xbmcvfs.File(filepath, 'r')
             try:
                 wrapper = VFSFileWrapper(vfs_file)
-                mkv = enzyme.MKV(wrapper)
+
+                try:
+                    mkv = enzyme.MKV(wrapper)
+                except MemoryError:
+                    xbmc.log('SkipIntro: MKV parsing aborted — file triggered memory exhaustion', xbmc.LOGWARNING)
+                    return []
+                except RecursionError:
+                    xbmc.log('SkipIntro: MKV parsing aborted — file structure too deeply nested', xbmc.LOGWARNING)
+                    return []
 
                 if not hasattr(mkv, 'chapters') or not mkv.chapters:
                     xbmc.log('SkipIntro: enzyme parsed MKV but found no chapters', xbmc.LOGINFO)
                     return []
 
                 chapters = []
-                for i, chapter in enumerate(mkv.chapters, 1):
+                for i, chapter in enumerate(mkv.chapters[:self.MAX_CHAPTERS], 1):
                     start_seconds = chapter.start.total_seconds()
                     end_seconds = chapter.end.total_seconds() if chapter.end else None
                     name = chapter.string if hasattr(chapter, 'string') and chapter.string else f'Chapter {i}'
+                    name = name[:self.MAX_CHAPTER_NAME_LEN]
 
                     chapters.append({
                         'name': name,

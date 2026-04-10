@@ -323,12 +323,11 @@ def save_user_times():
     # Initialize database
     xbmc.log('SkipIntro: Initializing database', xbmc.LOGINFO)
     addon = xbmcaddon.Addon()
-    db_path = addon.getSetting('database_path')
-    if not db_path:
-        db_path = 'special://userdata/addon_data/plugin.video.skipintro/shows.db'
+    db_path = 'special://userdata/addon_data/plugin.video.skipintro/shows.db'
 
     translated_path = xbmcvfs.translatePath(db_path)
-    xbmc.log(f'SkipIntro: Database path translated: {translated_path}', xbmc.LOGINFO)
+    from resources.lib.metadata import sanitize_path
+    xbmc.log(f'SkipIntro: Database path translated: {sanitize_path(translated_path)}', xbmc.LOGINFO)
 
     # Ensure database directory exists
     db_dir = os.path.dirname(translated_path)

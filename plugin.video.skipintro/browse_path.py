@@ -3,6 +3,7 @@
 
 import xbmc
 import xbmcgui
+from resources.lib.metadata import sanitize_path
 import xbmcaddon
 
 
@@ -31,7 +32,7 @@ def browse_and_set_path():
 
         # If user selected a path (didn't cancel)
         if selected_path:
-            xbmc.log(f'SkipIntro: Selected backup path: {selected_path}', xbmc.LOGINFO)
+            xbmc.log(f'SkipIntro: Selected backup path: {sanitize_path(selected_path)}', xbmc.LOGINFO)
 
             # Show path in a text dialog so user can verify and copy if needed
             dialog.textviewer(
@@ -44,7 +45,7 @@ def browse_and_set_path():
             # Save to settings
             addon.setSetting('backup_restore_path', selected_path)
 
-            xbmc.log(f'SkipIntro: Backup path saved to settings: {selected_path}', xbmc.LOGINFO)
+            xbmc.log(f'SkipIntro: Backup path saved to settings: {sanitize_path(selected_path)}', xbmc.LOGINFO)
         else:
             xbmc.log('SkipIntro: Browse path cancelled by user', xbmc.LOGINFO)
 

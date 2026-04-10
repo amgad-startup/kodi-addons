@@ -7,6 +7,7 @@ import os
 import shutil
 from datetime import datetime
 from resources.lib.database import ShowDatabase
+from resources.lib.metadata import sanitize_path
 
 
 class DatabaseManager:
@@ -31,20 +32,48 @@ class DatabaseManager:
         if not xbmcvfs.exists(self.addon_data_path):
             xbmcvfs.mkdirs(self.addon_data_path)
 
+    @staticmethod
+    def _validate_import_config(config):
+        """Validate and sanitize imported config values to prevent bad data in DB."""
+        if not isinstance(config, dict):
+            return None
+        clean = {}
+        for key in ['intro_start_chapter', 'intro_end_chapter', 'outro_start_chapter']:
+            val = config.get(key)
+            if val is not None:
+                if isinstance(val, int) and 0 < val < 10000:
+                    clean[key] = val
+                else:
+                    clean[key] = None
+            else:
+                clean[key] = None
+        for key in ['intro_start_time', 'intro_end_time', 'outro_start_time']:
+            val = config.get(key)
+            if val is not None:
+                if isinstance(val, (int, float)) and 0 <= val <= 86400:
+                    clean[key] = float(val)
+                else:
+                    clean[key] = None
+            else:
+                clean[key] = None
+        clean['use_chapters'] = bool(config.get('use_chapters', False))
+        clean['config_created_at'] = config.get('config_created_at')
+        return clean
+
     def _get_backup_restore_path(self):
         """Get backup/restore path from settings, with fallback to default"""
         custom_path = self.addon.getSetting('backup_restore_path')
-        xbmc.log(f'SkipIntro: backup_restore_path setting = "{custom_path}"', xbmc.LOGINFO)
+        xbmc.log(f'SkipIntro: backup_restore_path setting = "{sanitize_path(custom_path)}"', xbmc.LOGINFO)
 
         if custom_path and custom_path.strip():
             path = xbmcvfs.translatePath(custom_path)
-            xbmc.log(f'SkipIntro: Using custom backup path: {path}', xbmc.LOGINFO)
+            xbmc.log(f'SkipIntro: Using custom backup path: {sanitize_path(path)}', xbmc.LOGINFO)
             # Ensure path ends with separator
             if not path.endswith(os.sep):
                 path += os.sep
             return path
 
-        xbmc.log(f'SkipIntro: Using default backup path: {self.addon_data_path}', xbmc.LOGINFO)
+        xbmc.log(f'SkipIntro: Using default backup path: {sanitize_path(self.addon_data_path)}', xbmc.LOGINFO)
         return self.addon_data_path
 
     def backup_database(self):
@@ -68,7 +97,7 @@ class DatabaseManager:
 
             # Copy database file
             if xbmcvfs.copy(self.db_path, backup_path):
-                xbmc.log(f'SkipIntro: Database backed up to {backup_path}', xbmc.LOGINFO)
+                xbmc.log(f'SkipIntro: Database backed up to {sanitize_path(backup_path)}', xbmc.LOGINFO)
                 xbmcgui.Dialog().notification(
                     'Skip Intro',
                     f'Database backed up successfully',
@@ -123,11 +152,11 @@ class DatabaseManager:
             if xbmcvfs.exists(self.db_path):
                 current_backup = self.db_path + '.before_restore'
                 xbmcvfs.copy(self.db_path, current_backup)
-                xbmc.log(f'SkipIntro: Current database backed up to {current_backup}', xbmc.LOGINFO)
+                xbmc.log(f'SkipIntro: Current database backed up to {sanitize_path(current_backup)}', xbmc.LOGINFO)
 
             # Restore from backup
             if xbmcvfs.copy(backup_file, self.db_path):
-                xbmc.log(f'SkipIntro: Database restored from {backup_file}', xbmc.LOGINFO)
+                xbmc.log(f'SkipIntro: Database restored from {sanitize_path(backup_file)}', xbmc.LOGINFO)
                 dialog.notification(
                     'Skip Intro',
                     'Database restored successfully',
@@ -221,7 +250,7 @@ class DatabaseManager:
             finally:
                 vfs_file.close()
 
-            xbmc.log(f'SkipIntro: Database exported to {export_path}', xbmc.LOGINFO)
+            xbmc.log(f'SkipIntro: Database exported to {sanitize_path(export_path)}', xbmc.LOGINFO)
             xbmcgui.Dialog().notification(
                 'Skip Intro',
                 f'Exported {len(shows_data)} shows to JSON',
@@ -323,8 +352,16 @@ class DatabaseManager:
 
             for show_data in shows_data:
                 try:
-                    title = show_data['title']
+                    title = show_data.get('title', '')
+                    if not isinstance(title, str) or not title.strip() or len(title) > 500:
+                        xbmc.log('SkipIntro: Skipping import entry - invalid title', xbmc.LOGWARNING)
+                        skipped_count += 1
+                        continue
+                    title = title.strip()
+
                     config = show_data.get('config')
+                    if config:
+                        config = self._validate_import_config(config)
                     show_created_at = show_data.get('created_at')
 
                     if not config:

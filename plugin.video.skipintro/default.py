@@ -22,9 +22,7 @@ MONITOR_INTERVAL_SEC = 0.5  # How often to check playback state (500ms)
 def get_database():
     """Initialize and return database connection"""
     try:
-        db_path = addon.getSetting('database_path').strip()
-        if not db_path:
-            db_path = 'special://userdata/addon_data/plugin.video.skipintro/shows.db'
+        db_path = 'special://userdata/addon_data/plugin.video.skipintro/shows.db'
 
         # Ensure directory exists
         translated_path = xbmcvfs.translatePath(db_path)
@@ -628,24 +626,25 @@ class SkipIntroPlayer(xbmc.Player):
             xbmc.log('SkipIntro: Error skipping to intro end: {}'.format(str(e)), xbmc.LOGERROR)
 
     def cleanup(self):
-        """Clean up resources"""
-        self.ui.cleanup()
-        self.intro_start = None
-        self.intro_duration = None
-        self.intro_bookmark = None
-        self.outro_bookmark = None
-        self.bookmarks_checked = False
-        self.prompt_shown = False
-        self.show_info = None
-        self.timer_active = False
-        self.next_check_time = 0
-        self.warning_timer_active = False
-        self.warning_check_time = 0
-        self.dismiss_timer_active = False
-        self.dismiss_check_time = 0
-        self.show_from_start = False
-        self.has_config = False
-        self._skip_to_chapter = None
+        """Clean up resources. Acquires timer lock to prevent race with onPlayBackTime."""
+        with self._timer_lock:
+            self.ui.cleanup()
+            self.intro_start = None
+            self.intro_duration = None
+            self.intro_bookmark = None
+            self.outro_bookmark = None
+            self.bookmarks_checked = False
+            self.prompt_shown = False
+            self.show_info = None
+            self.timer_active = False
+            self.next_check_time = 0
+            self.warning_timer_active = False
+            self.warning_check_time = 0
+            self.dismiss_timer_active = False
+            self.dismiss_check_time = 0
+            self.show_from_start = False
+            self.has_config = False
+            self._skip_to_chapter = None
 
     def set_manual_times(self):
         """Prompt user for manual intro/outro times and save them"""
@@ -702,6 +701,8 @@ class SkipIntroPlayer(xbmc.Player):
 
 def main():
     xbmc.log('SkipIntro: Service starting', xbmc.LOGINFO)
+
+
 
     player = SkipIntroPlayer()
     monitor = xbmc.Monitor()

@@ -3,6 +3,11 @@ import json
 import xbmc
 import xbmcvfs
 
+
+def sanitize_path(path):
+    """Remove credentials from SMB/NFS URLs for safe logging."""
+    return re.sub(r'(smb://|nfs://)[^:]+:[^@]+@', r'\1***:***@', str(path))
+
 class ShowMetadata:
     def __init__(self):
         self.show_regex = re.compile(r'^(.*?)(?:s(\d{1,2})e(\d{1,2})|(\d{1,2})x(\d{1,2}))', re.IGNORECASE)
