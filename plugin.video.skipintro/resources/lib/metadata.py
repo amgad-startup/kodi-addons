@@ -81,37 +81,26 @@ class ShowMetadata:
         return None
         
     def get_chapters(self):
-        """Get chapter information for currently playing video using JSON-RPC"""
+        """Get chapter information for currently playing video using InfoLabels.
+
+        Works on all platforms including Android TV where JSON-RPC
+        Player.GetProperties doesn't expose chapter fields.
+        """
         try:
             if not xbmc.Player().isPlayingVideo():
                 xbmc.log('SkipIntro: No video playing to get chapters from', xbmc.LOGWARNING)
                 return []
-                
-            # First, get media details including chapter count
-            json_cmd = {
-                'jsonrpc': '2.0',
-                'id': 1,
-                'method': 'Player.GetProperties',
-                'params': {
-                    'playerid': 1,  # 1 is for video player
-                    'properties': ['chapter', 'chaptercount', 'currenttime']
-                }
-            }
-            
-            result = json.loads(xbmc.executeJSONRPC(json.dumps(json_cmd)))
-            
-            if 'result' not in result:
-                xbmc.log('SkipIntro: No chapter information found in JSON-RPC response', xbmc.LOGWARNING)
-                return []
-                
-            chapter_count = result['result'].get('chaptercount', 0)
+
+            count_str = xbmc.getInfoLabel('Player.ChapterCount')
+            chapter_count = int(count_str) if count_str and count_str.isdigit() else 0
+
             if chapter_count == 0:
                 xbmc.log('SkipIntro: Video has no chapters', xbmc.LOGWARNING)
                 return []
-                
-            xbmc.log(f'SkipIntro: Found {chapter_count} chapters', xbmc.LOGINFO)
+
+            xbmc.log(f'SkipIntro: Found {chapter_count} chapters via InfoLabels', xbmc.LOGINFO)
             return [{'number': i + 1} for i in range(chapter_count)]
-            
+
         except Exception as e:
             xbmc.log(f'SkipIntro: Error getting chapters: {str(e)}', xbmc.LOGERROR)
             return []

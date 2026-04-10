@@ -391,20 +391,37 @@ class SkipIntroPlayer(xbmc.Player):
 
         self.default_skip_checked = True
 
+    def _seek_to_chapter(self, target_chapter):
+        """Seek to a specific chapter number using InfoLabels and chapter-forward actions."""
+        try:
+            current = xbmc.getInfoLabel('Player.Chapter')
+            current_num = int(current) if current and current.isdigit() else 0
+            if current_num <= 0:
+                xbmc.log('SkipIntro: Cannot determine current chapter', xbmc.LOGWARNING)
+                return False
+
+            steps = target_chapter - current_num
+            if steps <= 0:
+                xbmc.log(f'SkipIntro: Already at or past chapter {target_chapter}', xbmc.LOGINFO)
+                return True
+
+            xbmc.log(f'SkipIntro: Seeking from chapter {current_num} to {target_chapter} ({steps} steps)', xbmc.LOGINFO)
+            for i in range(steps):
+                xbmc.executebuiltin('PlayerControl(Next)')
+                xbmc.sleep(200)
+
+            xbmc.log(f'SkipIntro: Chapter seek completed, now at chapter {xbmc.getInfoLabel("Player.Chapter")}', xbmc.LOGINFO)
+            return True
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Error in chapter seek: {str(e)}', xbmc.LOGERROR)
+            return False
+
     def skip_to_intro_end(self):
         if self.intro_bookmark:
             try:
                 if self._skip_to_chapter:
-                    # Chapter-seek mode for network files — use Kodi JSON-RPC
-                    import json
                     xbmc.log(f'SkipIntro: Seeking to chapter {self._skip_to_chapter}', xbmc.LOGINFO)
-                    result = xbmc.executeJSONRPC(json.dumps({
-                        "jsonrpc": "2.0",
-                        "method": "Player.Seek",
-                        "params": {"playerid": 1, "value": {"chapter": self._skip_to_chapter}},
-                        "id": 1
-                    }))
-                    xbmc.log(f'SkipIntro: Chapter seek result: {result}', xbmc.LOGINFO)
+                    self._seek_to_chapter(self._skip_to_chapter)
                 else:
                     current_time = self.getTime()
                     xbmc.log(f'SkipIntro: Skipping from {current_time} to {self.intro_bookmark} seconds', xbmc.LOGINFO)
