@@ -694,19 +694,43 @@ class TestChapterManager(unittest.TestCase):
         ch = CM.find_chapter_by_name(self.chapters, 'NonExistent')
         self.assertIsNone(ch)
 
-    def test_find_intro_chapter(self):
-        """find_intro_chapter finds intro by name heuristic"""
-        result = self.mgr.find_intro_chapter(self.chapters)
-        self.assertEqual(result, 112)  # Time of 'Intro' chapter
-
-    def test_find_intro_chapter_no_match(self):
-        """find_intro_chapter returns None when no intro-named chapter exists"""
+    def test_autodetect_intro_by_name(self):
+        """autodetect_intro finds intro by 'Intro'/'Intro End' chapter names"""
         chapters = [
             {'name': 'Start', 'time': 0, 'number': 1},
-            {'name': 'Main', 'time': 100, 'number': 2},
+            {'name': 'Intro', 'time': 112, 'number': 2},
+            {'name': 'Intro End', 'time': 157, 'number': 3},
+            {'name': 'Credits Starting', 'time': 1352, 'number': 4},
         ]
-        result = self.mgr.find_intro_chapter(chapters)
+        result = self.mgr.autodetect_intro(chapters)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['intro_start_chapter'], 2)
+        self.assertEqual(result['intro_end_chapter'], 3)
+        self.assertEqual(result['intro_start_time'], 112)
+        self.assertEqual(result['intro_end_time'], 157)
+        self.assertEqual(result['outro_start_chapter'], 4)
+
+    def test_autodetect_intro_no_match(self):
+        """autodetect_intro returns None when no intro-named chapter exists"""
+        chapters = [
+            {'name': 'Chapter 1', 'time': 0, 'number': 1},
+            {'name': 'Chapter 2', 'time': 100, 'number': 2},
+        ]
+        result = self.mgr.autodetect_intro(chapters)
         self.assertIsNone(result)
+
+    def test_autodetect_intro_by_next_chapter(self):
+        """autodetect_intro uses next chapter as end when only 'Intro' found"""
+        chapters = [
+            {'name': 'Start', 'time': 0, 'number': 1},
+            {'name': 'Intro', 'time': 30, 'number': 2},
+            {'name': 'Main Content', 'time': 90, 'number': 3},
+        ]
+        result = self.mgr.autodetect_intro(chapters)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['intro_start_chapter'], 2)
+        self.assertEqual(result['intro_end_chapter'], 3)
+        self.assertEqual(result['intro_end_time'], 90)
 
 
 class TestMetadataFilenameEdgeCases(unittest.TestCase):
