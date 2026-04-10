@@ -342,7 +342,7 @@ class SkipIntroPlayer(xbmc.Player):
             xbmc.log('SkipIntro: No chapters found for chapter-based markers', xbmc.LOGWARNING)
             return False
 
-        intro_start_chapter = config.get('intro_start_chapter')
+        intro_start_chapter = config.get('intro_start_chapter') or 1  # Default to chapter 1
         intro_end_chapter = config.get('intro_end_chapter')
         intro_duration = config.get('intro_duration')
         outro_start_chapter = config.get('outro_start_chapter')
