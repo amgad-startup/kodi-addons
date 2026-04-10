@@ -62,7 +62,7 @@ class ShowMetadata:
             match = self.show_regex.search(basename)
             if match:
                 groups = match.groups()
-                title = groups[0].strip().replace('.', ' ')
+                title = groups[0].replace('.', ' ').strip()
                 
                 # Handle both SxxExx and xxXxx formats
                 season = int(groups[1] or groups[3])

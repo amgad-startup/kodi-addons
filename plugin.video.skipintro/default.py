@@ -48,6 +48,7 @@ class SkipIntroPlayer(xbmc.Player):
         self.metadata = ShowMetadata()
         self.ui = PlayerUI()
         self.show_from_start = False  # New flag for chapter-only mode
+        self._skip_to_chapter = None  # Chapter number for network-file seek
         
         # Initialize settings
         self.settings_manager = Settings()
@@ -254,20 +255,32 @@ class SkipIntroPlayer(xbmc.Player):
             xbmc.log('SkipIntro: No chapters found for chapter-based markers', xbmc.LOGWARNING)
             return False
 
-        intro_start_chapter = config.get('intro_start_chapter')
+        intro_start_chapter = config.get('intro_start_chapter') or 1  # Default to chapter 1
         intro_end_chapter = config.get('intro_end_chapter')
         outro_start_chapter = config.get('outro_start_chapter')
 
-        if intro_start_chapter is not None and intro_end_chapter is not None:
+        if intro_end_chapter is not None:
             if 1 <= intro_start_chapter <= len(chapters) and 1 <= intro_end_chapter <= len(chapters):
-                self.intro_start = chapters[intro_start_chapter - 1]['time']
-                self.intro_bookmark = chapters[intro_end_chapter - 1]['time']
-                self.intro_duration = self.intro_bookmark - self.intro_start
+                # Chapters from ffmpeg have 'time', JSON-RPC chapters only have 'number'
+                if 'time' in chapters[0]:
+                    self.intro_start = chapters[intro_start_chapter - 1]['time']
+                    self.intro_bookmark = chapters[intro_end_chapter - 1]['time']
+                    self.intro_duration = self.intro_bookmark - self.intro_start
+                else:
+                    # Network files: no timestamps, use chapter-seek mode
+                    # Store chapter numbers and use show_from_start so button shows immediately
+                    self._skip_to_chapter = intro_end_chapter
+                    self.intro_start = 0
+                    self.intro_bookmark = 1  # Sentinel — skip uses chapter seek, not time seek
+                    self.intro_duration = None
+                    xbmc.log(f'SkipIntro: Using chapter-seek mode, will seek to chapter {intro_end_chapter}', xbmc.LOGINFO)
+
                 self.show_from_start = intro_start_chapter == 1
-                
+
                 if outro_start_chapter is not None and 1 <= outro_start_chapter <= len(chapters):
-                    self.outro_bookmark = chapters[outro_start_chapter - 1]['time']
-                
+                    if 'time' in chapters[0]:
+                        self.outro_bookmark = chapters[outro_start_chapter - 1]['time']
+
                 xbmc.log(f'SkipIntro: Using chapter-based markers - start: {self.intro_start}, end: {self.intro_bookmark}', xbmc.LOGINFO)
                 return True
             else:
@@ -337,8 +350,13 @@ class SkipIntroPlayer(xbmc.Player):
             self.bookmarks_checked = True
 
     def getChapters(self):
+        """Get chapters, trying ffmpeg first (local files), falling back to Kodi JSON-RPC."""
         chapter_manager = ChapterManager()
-        return chapter_manager.get_chapters()
+        chapters = chapter_manager.get_chapters()
+        if not chapters:
+            # Fallback to Kodi JSON-RPC (works for network streams)
+            chapters = self.metadata.get_chapters()
+        return chapters
 
     def find_intro_chapter(self, chapters):
         chapter_manager = ChapterManager()
@@ -376,9 +394,21 @@ class SkipIntroPlayer(xbmc.Player):
     def skip_to_intro_end(self):
         if self.intro_bookmark:
             try:
-                current_time = self.getTime()
-                xbmc.log(f'SkipIntro: Skipping from {current_time} to {self.intro_bookmark} seconds', xbmc.LOGINFO)
-                self.seekTime(self.intro_bookmark)
+                if self._skip_to_chapter:
+                    # Chapter-seek mode for network files — use Kodi JSON-RPC
+                    import json
+                    xbmc.log(f'SkipIntro: Seeking to chapter {self._skip_to_chapter}', xbmc.LOGINFO)
+                    result = xbmc.executeJSONRPC(json.dumps({
+                        "jsonrpc": "2.0",
+                        "method": "Player.Seek",
+                        "params": {"playerid": 1, "value": {"chapter": self._skip_to_chapter}},
+                        "id": 1
+                    }))
+                    xbmc.log(f'SkipIntro: Chapter seek result: {result}', xbmc.LOGINFO)
+                else:
+                    current_time = self.getTime()
+                    xbmc.log(f'SkipIntro: Skipping from {current_time} to {self.intro_bookmark} seconds', xbmc.LOGINFO)
+                    self.seekTime(self.intro_bookmark)
                 xbmc.log('SkipIntro: Skip completed', xbmc.LOGINFO)
             except Exception as e:
                 xbmc.log('SkipIntro: Error skipping to intro end: {}'.format(str(e)), xbmc.LOGERROR)
@@ -397,6 +427,7 @@ class SkipIntroPlayer(xbmc.Player):
         self.timer_active = False
         self.next_check_time = 0
         self.show_from_start = False
+        self._skip_to_chapter = None
 
     def set_manual_times(self):
         """Prompt user for manual intro/outro times and save them"""

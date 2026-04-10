@@ -189,10 +189,11 @@ class ShowDatabase:
     def get_show(self, title):
         """Get show by title, create if doesn't exist"""
         try:
+            title = title.strip()
             xbmc.log(f'SkipIntro: Looking up show: {title}', xbmc.LOGINFO)
             with sqlite3.connect(self.db_path) as conn:
                 c = conn.cursor()
-                c.execute('SELECT id FROM shows WHERE title = ?', (title,))
+                c.execute('SELECT id FROM shows WHERE TRIM(title) = ?', (title,))
                 result = c.fetchone()
                 
                 if result:
