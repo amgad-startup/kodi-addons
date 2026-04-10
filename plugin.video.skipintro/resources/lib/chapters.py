@@ -1,110 +1,35 @@
-import os
-import shutil
-
 import xbmc
-import json
-import subprocess
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Optional
 
 class ChapterManager:
-    """Manages chapter detection for video files using FFmpeg."""
+    """Chapter utility methods for skip intro functionality.
+
+    Chapter data is obtained via ShowMetadata.get_chapters() (InfoLabels).
+    This class provides helper methods for looking up chapters by number
+    and identifying intro/outro chapters.
+    """
 
     def __init__(self):
         self._cached_chapters = {}
-        self._ffmpeg_path = shutil.which('ffmpeg') or '/usr/local/bin/ffmpeg'
-    
+
     def get_chapters(self) -> List[Dict[str, Union[str, int, float]]]:
-        """Get chapter information using ffmpeg."""
+        """Get chapter information using Kodi InfoLabels.
+
+        Returns a list of chapter dicts with 'number' keys.
+        Timestamps are not available via InfoLabels alone.
+        """
         try:
-            # Get current file using Kodi's JSON-RPC API
-            result = xbmc.executeJSONRPC(json.dumps({
-                "jsonrpc": "2.0",
-                "method": "Player.GetItem",
-                "params": {
-                    "playerid": 1,
-                    "properties": ["title", "file"]
-                },
-                "id": 1
-            }))
-            
-            result = json.loads(result)
-            if 'result' not in result or 'item' not in result['result']:
-                return []
-                
-            current_file = result['result']['item'].get('file')
-            if not current_file:
+            if not xbmc.Player().isPlayingVideo():
                 return []
 
-            # Only process local files — skip network streams to avoid
-            # ffmpeg protocol exploitation (smb://, http://, concat:, etc.)
-            if '://' in current_file:
-                xbmc.log('SkipIntro: Skipping chapter detection for non-local file', xbmc.LOGINFO)
+            count_str = xbmc.getInfoLabel('Player.ChapterCount')
+            chapter_count = int(count_str) if count_str and count_str.isdigit() else 0
+
+            if chapter_count == 0:
                 return []
 
-            # Return cached chapters if available
-            if current_file in self._cached_chapters:
-                return self._cached_chapters[current_file]
-
-            if not os.path.isfile(current_file):
-                xbmc.log(f'SkipIntro: File not found for chapter detection: {os.path.basename(current_file)}', xbmc.LOGWARNING)
-                return []
-
-            # Get chapter metadata using ffmpeg with restricted protocol access
-            cmd = [self._ffmpeg_path, "-protocol_whitelist", "file,pipe",
-                   "-i", current_file, "-f", "ffmetadata", "-"]
-            
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                metadata = result.stdout
-                
-                if result.returncode != 0:
-                    xbmc.log(f"SkipIntro: FFmpeg error: {result.stderr}", xbmc.LOGERROR)
-                    return []
-                
-                chapters = []
-                current_chapter = {}
-                chapter_number = 1
-                
-                # Parse metadata
-                for line in metadata.splitlines():
-                    if line.startswith("[CHAPTER]"):
-                        if current_chapter and 'start' in current_chapter and 'end' in current_chapter:
-                            chapters.append({
-                                'name': current_chapter.get('title', f'Chapter {chapter_number}'),
-                                'time': current_chapter['start'],
-                                'end_time': current_chapter['end'],
-                                'number': chapter_number
-                            })
-                            chapter_number += 1
-                        current_chapter = {}
-                    elif line.startswith("START="):
-                        current_chapter["start"] = int(line.split("=")[1]) / 1e9  # Convert nanoseconds to seconds
-                    elif line.startswith("END="):
-                        current_chapter["end"] = int(line.split("=")[1]) / 1e9  # Convert nanoseconds to seconds
-                    elif line.startswith("title="):
-                        current_chapter["title"] = line.split("=")[1]
-                
-                # Add the last chapter
-                if current_chapter and 'start' in current_chapter and 'end' in current_chapter:
-                    chapters.append({
-                        'name': current_chapter.get('title', f'Chapter {chapter_number}'),
-                        'time': current_chapter['start'],
-                        'end_time': current_chapter['end'],
-                        'number': chapter_number
-                    })
-                
-                if chapters:
-                    xbmc.log(f"SkipIntro: Found {len(chapters)} chapters", xbmc.LOGINFO)
-                        
-                self._cached_chapters[current_file] = chapters
-                return chapters
-                
-            except subprocess.TimeoutExpired:
-                xbmc.log("SkipIntro: FFmpeg command timed out", xbmc.LOGERROR)
-                return []
-            except Exception as e:
-                xbmc.log(f"SkipIntro: Error running ffmpeg: {str(e)}", xbmc.LOGERROR)
-                return []
+            xbmc.log(f'SkipIntro: Found {chapter_count} chapters via InfoLabels', xbmc.LOGINFO)
+            return [{'number': i + 1, 'name': f'Chapter {i + 1}'} for i in range(chapter_count)]
 
         except Exception as e:
             xbmc.log(f'SkipIntro: Error getting chapters: {str(e)}', xbmc.LOGERROR)
@@ -114,7 +39,7 @@ class ChapterManager:
         """Get chapter info by chapter number."""
         if not chapters or chapter_number is None:
             return None
-            
+
         try:
             for chapter in chapters:
                 if chapter['number'] == chapter_number:
@@ -128,20 +53,20 @@ class ChapterManager:
         """Get intro start and end chapters based on configured chapter numbers."""
         if not chapters or end_chapter is None:  # end chapter is required
             return None, None
-            
+
         try:
             # Get start chapter (optional, defaults to first chapter)
             start = self.get_chapter_by_number(chapters, start_chapter if start_chapter else 1)
             if not start and start_chapter:  # Only fail if specific start chapter was requested
                 xbmc.log(f'SkipIntro: Start chapter {start_chapter} not found', xbmc.LOGWARNING)
                 return None, None
-                
+
             # Get end chapter (required)
             end = self.get_chapter_by_number(chapters, end_chapter)
             if not end:
                 xbmc.log(f'SkipIntro: End chapter {end_chapter} not found', xbmc.LOGWARNING)
                 return None, None
-                
+
             return start, end
         except Exception as e:
             xbmc.log(f'SkipIntro: Error getting intro chapters: {str(e)}', xbmc.LOGERROR)
@@ -151,14 +76,41 @@ class ChapterManager:
         """Get outro chapter based on configured chapter number."""
         if not chapters or outro_chapter is None:
             return None
-            
+
         try:
             outro = self.get_chapter_by_number(chapters, outro_chapter)
             if not outro:
                 xbmc.log(f'SkipIntro: Outro chapter {outro_chapter} not found', xbmc.LOGWARNING)
                 return None
-                
+
             return outro
         except Exception as e:
             xbmc.log(f'SkipIntro: Error getting outro chapter: {str(e)}', xbmc.LOGERROR)
             return None
+
+    @staticmethod
+    def find_chapter_by_name(chapters, name):
+        """Find a chapter by name (case-insensitive partial match)."""
+        if not chapters or not name:
+            return None
+        name_lower = name.lower()
+        for chapter in chapters:
+            if name_lower in chapter.get('name', '').lower():
+                return chapter
+        return None
+
+    def find_intro_chapter(self, chapters):
+        """Find the intro chapter by name heuristics.
+
+        Returns the start time of the intro chapter, or None.
+        """
+        if not chapters:
+            return None
+
+        intro_names = ['intro', 'opening', 'op']
+        for chapter in chapters:
+            chapter_name = chapter.get('name', '').lower()
+            for name in intro_names:
+                if name in chapter_name:
+                    return chapter.get('time')
+        return None

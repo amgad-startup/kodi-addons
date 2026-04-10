@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 
 import xbmc
 import xbmcaddon
@@ -9,25 +10,28 @@ import xbmcvfs
 from resources.lib.settings import Settings
 from resources.lib.chapters import ChapterManager
 from resources.lib.ui import PlayerUI
-from resources.lib.show import ShowManager
 from resources.lib.database import ShowDatabase
 from resources.lib.metadata import ShowMetadata
 
 addon = xbmcaddon.Addon()
 
+# Constants
+CHAPTER_WAIT_MS = 3000  # Additional wait for chapters to be available (3 seconds)
+MONITOR_INTERVAL_SEC = 0.5  # How often to check playback state (500ms)
+
 def get_database():
     """Initialize and return database connection"""
     try:
-        db_path = addon.getSetting('database_path')
+        db_path = addon.getSetting('database_path').strip()
         if not db_path:
             db_path = 'special://userdata/addon_data/plugin.video.skipintro/shows.db'
-        
+
         # Ensure directory exists
         translated_path = xbmcvfs.translatePath(db_path)
         db_dir = os.path.dirname(translated_path)
         if not os.path.exists(db_dir):
             os.makedirs(db_dir)
-            
+
         return ShowDatabase(translated_path)
     except Exception as e:
         xbmc.log('SkipIntro: Error initializing database: {}'.format(str(e)), xbmc.LOGERROR)
@@ -41,36 +45,43 @@ class SkipIntroPlayer(xbmc.Player):
         self.intro_bookmark = None
         self.outro_bookmark = None
         self.bookmarks_checked = False
-        self.default_skip_checked = False
         self.prompt_shown = False
         self.show_info = None
         self.db = get_database()
         self.metadata = ShowMetadata()
         self.ui = PlayerUI()
-        self.show_from_start = False  # New flag for chapter-only mode
+        self.show_from_start = False  # Flag for chapter-only mode
+        self.has_config = False  # Track if show has saved configuration
         self._skip_to_chapter = None  # Chapter number for network-file seek
-        
+
         # Initialize settings
         self.settings_manager = Settings()
         self.settings = self.settings_manager.settings
-        
-        # New timing control variables
+
+        # Timing control variables
         self.timer_active = False
         self.next_check_time = 0
-        
+        self.warning_timer_active = False
+        self.warning_check_time = 0
+        self.dismiss_timer_active = False
+        self.dismiss_check_time = 0
+
+        # Thread safety lock for timer operations
+        self._timer_lock = threading.Lock()
+
     def onPlayBackStopped(self):
         """Called when playback is stopped by user"""
         self.cleanup()
-        
+
     def onPlayBackEnded(self):
         """Called when playback ends naturally"""
         self.cleanup()
-        
+
     def onPlayBackStarted(self):
         """Called when Kodi starts playing a file"""
         xbmc.log('SkipIntro: Playback started', xbmc.LOGINFO)
         self.cleanup()  # Reset state for new playback
-        
+
     def _wait_for_video_info(self, timeout_ms=5000, interval_ms=500):
         """Poll until Kodi video info labels are available or timeout."""
         elapsed = 0
@@ -95,10 +106,15 @@ class SkipIntroPlayer(xbmc.Player):
         # Reset flags for new video
         self.bookmarks_checked = False
         self.prompt_shown = False
-        self.default_skip_checked = False
         self.timer_active = False
         self.next_check_time = 0
+        self.warning_timer_active = False
+        self.warning_check_time = 0
+        self.dismiss_timer_active = False
+        self.dismiss_check_time = 0
         self.show_from_start = False
+        self.has_config = False
+        self._skip_to_chapter = None
 
         # Wait for video info to become available (up to 5s, polls every 500ms)
         if not self._wait_for_video_info():
@@ -106,105 +122,163 @@ class SkipIntroPlayer(xbmc.Player):
 
         self.detect_show()
 
-        # Brief pause for chapter metadata to load
-        xbmc.sleep(1000)
-        if not self.isPlaying():
-            return
-            
         if self.show_info:
-            # First check saved times
+            # Check saved times immediately (no wait needed for time-based config)
             self.check_saved_times()
-            
-            # If no saved times and chapters enabled AND show is configured to use chapters, check chapters
-            if not self.intro_bookmark and self.settings['use_chapters'] and self.show_info:
+
+            # Only wait for chapters if we need them (chapter-based config or no config)
+            needs_chapters = False
+            if self.has_config and not self.intro_bookmark:
+                # Show has config but bookmarks not set - might be chapter-based
                 show_id = self.db.get_show(self.show_info['title'])
                 if show_id:
                     config = self.db.get_show_config(show_id)
-                    if config and config['use_chapters']:
+                    if config and config.get('use_chapters'):
+                        needs_chapters = True
+            elif not self.has_config:
+                # No config at all - need chapters for auto-detection
+                needs_chapters = True
+
+            # Wait for chapters if needed
+            if needs_chapters:
+                xbmc.log('SkipIntro: Waiting for chapters to load...', xbmc.LOGINFO)
+                xbmc.sleep(CHAPTER_WAIT_MS)
+                if not self.isPlaying():
+                    return
+
+                # Retry chapter-based config if applicable
+                if self.has_config and not self.intro_bookmark:
+                    show_id = self.db.get_show(self.show_info['title'])
+                    if show_id:
+                        config = self.db.get_show_config(show_id)
+                        if config and config.get('use_chapters'):
+                            xbmc.log('SkipIntro: Loading chapter-based markers', xbmc.LOGINFO)
+                            self.set_chapter_based_markers(config)
+
+                # Try chapter auto-detection if no config
+                if not self.intro_bookmark and not self.has_config:
+                    show_id = self.db.get_show(self.show_info['title'])
+                    if show_id:
                         chapters = self.getChapters()
                         if chapters:
-                            xbmc.log(f'SkipIntro: Found {len(chapters)} chapters', xbmc.LOGINFO)
+                            xbmc.log(f'SkipIntro: Found {len(chapters)} chapters for auto-detection', xbmc.LOGINFO)
                             self.check_for_intro_chapter()
-            
-            # If still no intro bookmark, use default skip
+
+            # No intro bookmark found - skip detection will not be active
             if not self.intro_bookmark:
-                self.check_for_default_skip()
+                xbmc.log('SkipIntro: No intro times found for this show', xbmc.LOGINFO)
             self.bookmarks_checked = True
-            
+
             # If we have intro times, set up the timer
             if self.intro_bookmark is not None:
+                # Reload settings to get latest values from UI
+                self.settings = self.settings_manager.validate_settings()
+
                 current_time = self.getTime()
+                pre_skip_seconds = self.settings.get('pre_skip_seconds', 3)
+                delay_autoskip = self.settings.get('delay_autoskip', 0)
+
                 if self.show_from_start:
-                    # For chapter-only mode, show button from start
-                    self.next_check_time = 0
+                    # Intro starts at 0 - show button from start, skip immediately (or after delay)
+                    self.warning_check_time = 0
+                    self.warning_timer_active = True
+                    # Skip at intro_start (0) + delay, not at intro_end!
+                    self.next_check_time = self.intro_start + delay_autoskip
                     self.timer_active = True
-                    xbmc.log('SkipIntro: Timer set to show button from start', xbmc.LOGINFO)
+                    xbmc.log(f'SkipIntro: Timer set to show warning from start and skip at {self.next_check_time} (intro_start: {self.intro_start}, delay: {delay_autoskip}s)', xbmc.LOGINFO)
                 elif self.intro_start is not None and current_time < self.intro_start:
-                    # Set timer to wake up at intro start
-                    self.next_check_time = self.intro_start
-                    self.timer_active = True
-                    xbmc.log(f'SkipIntro: Timer set to check at {self.next_check_time}', xbmc.LOGINFO)
+                    # Calculate actual skip time with delay
+                    actual_skip_time = self.intro_start + delay_autoskip
+
+                    # Calculate warning time (show notification X seconds before skip)
+                    self.warning_check_time = max(0, actual_skip_time - pre_skip_seconds)
+                    self.next_check_time = actual_skip_time
+
+                    # Activate warning timer if we haven't passed warning time
+                    if current_time < self.warning_check_time:
+                        self.warning_timer_active = True
+                        xbmc.log(f'SkipIntro: Warning timer set for {self.warning_check_time}, skip timer set for {self.next_check_time} (intro starts at {self.intro_start}, delay: {delay_autoskip}s)', xbmc.LOGINFO)
+                    else:
+                        # Already past warning time, just set skip timer
+                        self.timer_active = True
+                        xbmc.log(f'SkipIntro: Skip timer set for {self.next_check_time} (intro starts at {self.intro_start}, delay: {delay_autoskip}s)', xbmc.LOGINFO)
+
                 elif current_time < self.intro_bookmark:
-                    # Already in intro period, show button immediately
-                    self.show_skip_button()
+                    # Already in intro period, show warning or skip immediately
+                    warning_time = max(0, self.intro_bookmark - pre_skip_seconds)
+                    if current_time < warning_time:
+                        # Show warning
+                        seconds_until_skip = int(self.intro_bookmark - current_time)
+                        self.ui.show_skip_warning(seconds_until_skip)
+                        self.warning_timer_active = False
+                        # Set timer for actual skip
+                        self.next_check_time = self.intro_bookmark
+                        self.timer_active = True
+                    else:
+                        # Skip immediately
+                        self.show_skip_button()
 
     def onPlayBackTime(self, time):
         """Called during playback with current time"""
-        if not self.prompt_shown and self.timer_active:
-            if time >= self.next_check_time:
-                xbmc.log(f'SkipIntro: Timer triggered at {time}', xbmc.LOGINFO)
-                self.show_skip_button()
-                self.timer_active = False  # Disable timer after showing button
+        # Use lock to prevent race conditions
+        with self._timer_lock:
+            # Check warning timer first - show the button dialog
+            if self.warning_timer_active and time >= self.warning_check_time:
+                xbmc.log(f'SkipIntro: Warning timer triggered at {time} - showing skip button', xbmc.LOGINFO)
+
+                # Show the button dialog
+                if not self.prompt_shown:
+                    self.show_skip_button()
+
+                self.warning_timer_active = False
+                # Keep skip timer active for auto-skip
+                self.timer_active = True
+
+            # Check skip timer for auto-skip
+            if self.timer_active and time >= self.next_check_time:
+                xbmc.log(f'SkipIntro: Auto-skip timer triggered at {time}', xbmc.LOGINFO)
+
+                # Auto-skip now (if enabled)
+                if self.settings.get('enable_autoskip', True):
+                    self.skip_to_intro_end()
+                else:
+                    xbmc.log('SkipIntro: Auto-skip disabled in settings, skipping', xbmc.LOGINFO)
+                self.timer_active = False  # Disable timer after skip
+
+            # Check dismiss timer for auto-dismissing button
+            if self.dismiss_timer_active and time >= self.dismiss_check_time:
+                xbmc.log(f'SkipIntro: Auto-dismiss timer triggered at {time}', xbmc.LOGINFO)
+                self.ui.close_dialog()
+                self.dismiss_timer_active = False
 
     def show_skip_button(self):
-        """Show skip intro button or autoskip if enabled"""
+        """Show skip intro button"""
         if not self.prompt_shown and self.intro_bookmark is not None:
             current_time = self.getTime()
-            show_button = False
+            xbmc.log(f'SkipIntro: Showing skip button at {current_time}', xbmc.LOGINFO)
 
-            if self.show_from_start:
-                show_button = current_time < self.intro_bookmark
-            elif self.intro_start is not None:
-                show_button = current_time >= self.intro_start and current_time < self.intro_bookmark
+            if self.ui.prompt_skip_intro(lambda: self.skip_to_intro_end()):
+                self.prompt_shown = True
+                xbmc.log('SkipIntro: Skip button shown successfully', xbmc.LOGINFO)
 
-            if show_button:
-                # Check autoskip setting
-                try:
-                    autoskip = self.settings_manager.addon.getSettingBool('enable_autoskip')
-                except Exception:
-                    autoskip = False
-
-                if autoskip:
-                    delay = 0
-                    try:
-                        delay = int(self.settings_manager.addon.getSetting('delay_autoskip') or '0')
-                    except (ValueError, TypeError):
-                        pass
-                    if delay > 0:
-                        xbmc.log(f'SkipIntro: Autoskip in {delay}s', xbmc.LOGINFO)
-                        xbmc.sleep(delay * 1000)
-                    xbmc.log(f'SkipIntro: Autoskipping at {current_time}', xbmc.LOGINFO)
-                    self.skip_to_intro_end()
-                    self.prompt_shown = True
-                else:
-                    xbmc.log(f'SkipIntro: Showing skip button at {current_time}', xbmc.LOGINFO)
-                    if self.ui.prompt_skip_intro(lambda: self.skip_to_intro_end()):
-                        self.prompt_shown = True
-                        xbmc.log('SkipIntro: Skip button shown successfully', xbmc.LOGINFO)
-                    else:
-                        xbmc.log('SkipIntro: Failed to show skip button', xbmc.LOGWARNING)
+                # Set auto-dismiss timer if configured
+                auto_dismiss = self.settings.get('auto_dismiss_button', 0)
+                if auto_dismiss > 0:
+                    self.dismiss_check_time = current_time + auto_dismiss
+                    self.dismiss_timer_active = True
+                    xbmc.log(f'SkipIntro: Auto-dismiss timer set for {auto_dismiss} seconds (at {self.dismiss_check_time})', xbmc.LOGINFO)
             else:
-                xbmc.log(f'SkipIntro: Not showing skip button. Current time: {current_time}, Intro start: {self.intro_start}, Intro end: {self.intro_bookmark}', xbmc.LOGINFO)
+                xbmc.log('SkipIntro: Failed to show skip button', xbmc.LOGWARNING)
 
     def detect_show(self):
         """Detect current TV show and episode"""
         if not self.isPlaying():
             xbmc.log('SkipIntro: Not playing, skipping show detection', xbmc.LOGINFO)
             return
-            
+
         playing_file = self.getPlayingFile()
         xbmc.log(f'SkipIntro: Detecting show for file: {os.path.basename(playing_file)}', xbmc.LOGINFO)
-            
+
         self.show_info = self.metadata.get_show_info()
         if self.show_info:
             xbmc.log('SkipIntro: Detected show info:', xbmc.LOGINFO)
@@ -232,26 +306,22 @@ class SkipIntroPlayer(xbmc.Player):
             # Get show config
             config = self.db.get_show_config(show_id)
             xbmc.log(f'SkipIntro: Show config: {config}', xbmc.LOGINFO)
-            
+
             if config:
+                self.has_config = True
                 if config.get('use_chapters'):
                     self.set_chapter_based_markers(config)
                 else:
                     self.set_time_based_markers(config, "show config")
             else:
-                # If no config, use default times
-                default_times = {
-                    'intro_start_time': 0,
-                    'intro_end_time': 120,  # Default 2-minute intro
-                    'outro_start_time': None
-                }
-                self.set_time_based_markers(default_times, "default")
+                xbmc.log(f'SkipIntro: No config found for {self.show_info["title"]}, will use default skip behavior', xbmc.LOGINFO)
 
         except Exception as e:
             xbmc.log('SkipIntro: Error checking saved times: {}'.format(str(e)), xbmc.LOGERROR)
-        
-        xbmc.log('SkipIntro: Final times - intro_start: {}, duration: {}, outro_start: {}, bookmark: {}, show_from_start: {}'.format(
-            self.intro_start, self.intro_duration, self.outro_bookmark, self.intro_bookmark, self.show_from_start), xbmc.LOGINFO)
+
+        xbmc.log(f'SkipIntro: Final times - intro_start: {self.intro_start}, duration: {self.intro_duration}, '
+                 f'outro_start: {self.outro_bookmark}, bookmark: {self.intro_bookmark}, show_from_start: {self.show_from_start}',
+                 xbmc.LOGINFO)
 
     def set_time_based_markers(self, times, source_desc):
         """Set time-based markers"""
@@ -272,39 +342,107 @@ class SkipIntroPlayer(xbmc.Player):
             xbmc.log('SkipIntro: No chapters found for chapter-based markers', xbmc.LOGWARNING)
             return False
 
-        intro_start_chapter = config.get('intro_start_chapter') or 1  # Default to chapter 1
+        intro_start_chapter = config.get('intro_start_chapter')
         intro_end_chapter = config.get('intro_end_chapter')
+        intro_duration = config.get('intro_duration')
         outro_start_chapter = config.get('outro_start_chapter')
 
-        if intro_end_chapter is not None:
+        # Debug logging
+        xbmc.log(f'SkipIntro: Chapter config debug - start_ch={intro_start_chapter} (type={type(intro_start_chapter).__name__}), end_ch={intro_end_chapter} (type={type(intro_end_chapter).__name__}), duration={intro_duration} (type={type(intro_duration).__name__ if intro_duration is not None else "None"}), chapters_count={len(chapters)}', xbmc.LOGINFO)
+
+        # Start chapter + duration: Calculate end from start + duration
+        if intro_start_chapter is not None and intro_end_chapter is None and intro_duration is not None:
+            if 1 <= intro_start_chapter <= len(chapters):
+                ch = chapters[intro_start_chapter - 1]
+                if 'time' in ch and ch['time'] is not None:
+                    self.intro_start = ch['time']
+                    self.intro_bookmark = self.intro_start + intro_duration
+                    self.intro_duration = intro_duration
+                else:
+                    # Network files: no timestamps, use chapter-seek mode
+                    self._skip_to_chapter = intro_start_chapter  # Best effort
+                    self.intro_start = 0
+                    self.intro_bookmark = 99999
+                    self.intro_duration = None
+                    xbmc.log(f'SkipIntro: Using chapter-seek mode with start+duration', xbmc.LOGINFO)
+                self.show_from_start = intro_start_chapter == 1
+
+                if outro_start_chapter is not None and 1 <= outro_start_chapter <= len(chapters):
+                    outro_ch = chapters[outro_start_chapter - 1]
+                    if 'time' in outro_ch and outro_ch['time'] is not None:
+                        self.outro_bookmark = outro_ch['time']
+
+                xbmc.log(f'SkipIntro: Using start chapter + duration markers - start: {self.intro_start}, end: {self.intro_bookmark}', xbmc.LOGINFO)
+                return True
+            else:
+                xbmc.log('SkipIntro: Invalid intro start chapter number', xbmc.LOGWARNING)
+        # End chapter + duration: Calculate start from end - duration
+        elif intro_start_chapter is None and intro_end_chapter is not None and intro_duration is not None:
+            if 1 <= intro_end_chapter <= len(chapters):
+                chapter = chapters[intro_end_chapter - 1]
+
+                if 'time' not in chapter or chapter['time'] is None:
+                    # Network files: no timestamps, use chapter-seek mode
+                    self._skip_to_chapter = intro_end_chapter
+                    self.intro_start = 0
+                    self.intro_bookmark = 99999
+                    self.intro_duration = None
+                    self.show_from_start = False
+                    xbmc.log(f'SkipIntro: Using chapter-seek mode, will seek to chapter {intro_end_chapter}', xbmc.LOGINFO)
+
+                    if outro_start_chapter is not None and 1 <= outro_start_chapter <= len(chapters):
+                        outro_ch = chapters[outro_start_chapter - 1]
+                        if 'time' in outro_ch and outro_ch['time'] is not None:
+                            self.outro_bookmark = outro_ch['time']
+
+                    return True
+
+                self.intro_bookmark = chapter['time']
+                self.intro_start = max(0, self.intro_bookmark - intro_duration)
+                self.intro_duration = intro_duration
+                self.show_from_start = False
+
+                if outro_start_chapter is not None and 1 <= outro_start_chapter <= len(chapters):
+                    outro_chapter = chapters[outro_start_chapter - 1]
+                    if 'time' in outro_chapter and outro_chapter['time'] is not None:
+                        self.outro_bookmark = outro_chapter['time']
+
+                xbmc.log(f'SkipIntro: Using duration-based chapter markers - start: {self.intro_start} (calculated), end: {self.intro_bookmark}, duration: {intro_duration}s', xbmc.LOGINFO)
+                return True
+            else:
+                xbmc.log('SkipIntro: Invalid intro end chapter number', xbmc.LOGWARNING)
+        # Full chapter-based: Use both start and end chapters
+        elif intro_start_chapter is not None and intro_end_chapter is not None:
             if 1 <= intro_start_chapter <= len(chapters) and 1 <= intro_end_chapter <= len(chapters):
-                # Chapters from ffmpeg have 'time', JSON-RPC chapters only have 'number'
-                if 'time' in chapters[0]:
-                    self.intro_start = chapters[intro_start_chapter - 1]['time']
-                    self.intro_bookmark = chapters[intro_end_chapter - 1]['time']
+                start_ch = chapters[intro_start_chapter - 1]
+                end_ch = chapters[intro_end_chapter - 1]
+
+                if 'time' in start_ch and start_ch['time'] is not None:
+                    self.intro_start = start_ch['time']
+                    self.intro_bookmark = end_ch['time']
                     self.intro_duration = self.intro_bookmark - self.intro_start
                 else:
                     # Network files: no timestamps, use chapter-seek mode
-                    # Store chapter numbers and use show_from_start so button shows immediately
                     self._skip_to_chapter = intro_end_chapter
                     self.intro_start = 0
-                    self.intro_bookmark = 99999  # Large sentinel — button stays visible until clicked
+                    self.intro_bookmark = 99999  # Large sentinel - button stays visible until clicked
                     self.intro_duration = None
                     xbmc.log(f'SkipIntro: Using chapter-seek mode, will seek to chapter {intro_end_chapter}', xbmc.LOGINFO)
 
                 self.show_from_start = intro_start_chapter == 1
 
                 if outro_start_chapter is not None and 1 <= outro_start_chapter <= len(chapters):
-                    if 'time' in chapters[0]:
-                        self.outro_bookmark = chapters[outro_start_chapter - 1]['time']
+                    outro_ch = chapters[outro_start_chapter - 1]
+                    if 'time' in outro_ch and outro_ch['time'] is not None:
+                        self.outro_bookmark = outro_ch['time']
 
                 xbmc.log(f'SkipIntro: Using chapter-based markers - start: {self.intro_start}, end: {self.intro_bookmark}', xbmc.LOGINFO)
                 return True
             else:
                 xbmc.log('SkipIntro: Invalid chapter numbers for intro/outro', xbmc.LOGWARNING)
         else:
-            xbmc.log('SkipIntro: Missing intro start or end chapter', xbmc.LOGWARNING)
-        
+            xbmc.log('SkipIntro: Missing required chapter configuration (need start+duration OR end+duration OR start+end)', xbmc.LOGWARNING)
+
         return False
 
     def check_for_intro_chapter(self):
@@ -321,17 +459,17 @@ class SkipIntroPlayer(xbmc.Player):
                 xbmc.log(f'SkipIntro: Found {len(chapters)} chapters:', xbmc.LOGINFO)
                 for i, chapter in enumerate(chapters):
                     xbmc.log(f'  Chapter {i+1}: time={chapter.get("time")}, name={chapter.get("name", "Unnamed")}', xbmc.LOGINFO)
-                
+
                 intro_start = self.find_intro_chapter(chapters)
                 if intro_start is not None:
                     xbmc.log(f'SkipIntro: Found potential intro start at {intro_start}', xbmc.LOGINFO)
                     intro_chapter_index = None
                     for i, chapter in enumerate(chapters):
-                        if abs(chapter['time'] - intro_start) < 0.1:  # Compare with small tolerance
+                        if chapter.get('time') is not None and abs(chapter['time'] - intro_start) < 0.1:
                             intro_chapter_index = i
                             xbmc.log(f'SkipIntro: Matched intro to chapter {i+1}', xbmc.LOGINFO)
                             break
-                    
+
                     if intro_chapter_index is not None and intro_chapter_index + 1 < len(chapters):
                         self.intro_start = chapters[intro_chapter_index]['time']
                         self.intro_bookmark = chapters[intro_chapter_index + 1]['time']
@@ -341,72 +479,26 @@ class SkipIntroPlayer(xbmc.Player):
                         xbmc.log(f'  Start: {self.intro_start}', xbmc.LOGINFO)
                         xbmc.log(f'  End: {self.intro_bookmark}', xbmc.LOGINFO)
                         xbmc.log(f'  Duration: {self.intro_duration}', xbmc.LOGINFO)
-                        
-                        if self.settings['save_times'] and self.show_info and self.db:
-                            show_id = self.db.get_show(self.show_info['title'])
-                            times = {
-                                'intro_start_time': self.intro_start,
-                                'intro_end_time': self.intro_bookmark,
-                                'intro_start_chapter': intro_chapter_index + 1,  # Convert to 1-based index
-                                'intro_end_chapter': intro_chapter_index + 2,
-                                'outro_start_time': None,
-                                'source': 'chapters'
-                            }
-                            self.db.save_episode_times(
-                                show_id,
-                                self.show_info['season'],
-                                self.show_info['episode'],
-                                times
-                            )
                 else:
                     self.bookmarks_checked = True
             else:
-                self.check_for_default_skip()
+                xbmc.log('SkipIntro: No chapters found for auto-detection', xbmc.LOGINFO)
         except Exception as e:
             xbmc.log('SkipIntro: Error in check_for_intro_chapter: {}'.format(str(e)), xbmc.LOGERROR)
             self.bookmarks_checked = True
 
     def getChapters(self):
-        """Get chapters, trying ffmpeg first (local files), falling back to Kodi JSON-RPC."""
+        """Get chapters, trying ChapterManager first, falling back to metadata InfoLabels."""
         chapter_manager = ChapterManager()
         chapters = chapter_manager.get_chapters()
         if not chapters:
-            # Fallback to Kodi JSON-RPC (works for network streams)
+            # Fallback to metadata InfoLabels (works for network streams)
             chapters = self.metadata.get_chapters()
         return chapters
 
     def find_intro_chapter(self, chapters):
         chapter_manager = ChapterManager()
         return chapter_manager.find_intro_chapter(chapters)
-
-    def check_for_default_skip(self):
-        if self.default_skip_checked:
-            xbmc.log('SkipIntro: Default skip already checked', xbmc.LOGINFO)
-            return
-
-        try:
-            current_time = self.getTime()
-            default_delay = self.settings['default_delay']
-            skip_duration = self.settings['skip_duration']
-            
-            xbmc.log(f'SkipIntro: Checking default skip - current time: {current_time}, delay: {default_delay}', xbmc.LOGINFO)
-            
-            if current_time >= default_delay:
-                self.intro_start = current_time
-                self.intro_bookmark = current_time + skip_duration
-                xbmc.log(f'SkipIntro: Using default skip - will skip to: {self.intro_bookmark}', xbmc.LOGINFO)
-                self.show_skip_button()
-            else:
-                # Pre-set intro times so they're ready when the timer fires
-                self.intro_start = default_delay
-                self.intro_bookmark = default_delay + skip_duration
-                self.next_check_time = default_delay
-                self.timer_active = True
-                xbmc.log(f'SkipIntro: Set timer for default skip at {default_delay}, will skip to {self.intro_bookmark}', xbmc.LOGINFO)
-        except Exception as e:
-            xbmc.log('SkipIntro: Error in default skip check: {}'.format(str(e)), xbmc.LOGERROR)
-
-        self.default_skip_checked = True
 
     def _seek_to_chapter(self, target_chapter):
         """Seek to a specific chapter number using InfoLabels and chapter-forward actions."""
@@ -434,8 +526,11 @@ class SkipIntroPlayer(xbmc.Player):
             return False
 
     def skip_to_intro_end(self):
-        if self.intro_bookmark:
-            try:
+        try:
+            # Close the dialog if it's open (for auto-skip case)
+            self.ui.close_dialog()
+
+            if self.intro_bookmark is not None:
                 if self._skip_to_chapter:
                     xbmc.log(f'SkipIntro: Seeking to chapter {self._skip_to_chapter}', xbmc.LOGINFO)
                     self._seek_to_chapter(self._skip_to_chapter)
@@ -444,8 +539,11 @@ class SkipIntroPlayer(xbmc.Player):
                     xbmc.log(f'SkipIntro: Skipping from {current_time} to {self.intro_bookmark} seconds', xbmc.LOGINFO)
                     self.seekTime(self.intro_bookmark)
                 xbmc.log('SkipIntro: Skip completed', xbmc.LOGINFO)
-            except Exception as e:
-                xbmc.log('SkipIntro: Error skipping to intro end: {}'.format(str(e)), xbmc.LOGERROR)
+            else:
+                xbmc.log('SkipIntro: No intro bookmark or chapter set, cannot skip', xbmc.LOGWARNING)
+
+        except Exception as e:
+            xbmc.log('SkipIntro: Error skipping to intro end: {}'.format(str(e)), xbmc.LOGERROR)
 
     def cleanup(self):
         """Clean up resources"""
@@ -455,12 +553,16 @@ class SkipIntroPlayer(xbmc.Player):
         self.intro_bookmark = None
         self.outro_bookmark = None
         self.bookmarks_checked = False
-        self.default_skip_checked = False
         self.prompt_shown = False
         self.show_info = None
         self.timer_active = False
         self.next_check_time = 0
+        self.warning_timer_active = False
+        self.warning_check_time = 0
+        self.dismiss_timer_active = False
+        self.dismiss_check_time = 0
         self.show_from_start = False
+        self.has_config = False
         self._skip_to_chapter = None
 
     def set_manual_times(self):
@@ -518,22 +620,23 @@ class SkipIntroPlayer(xbmc.Player):
 
 def main():
     xbmc.log('SkipIntro: Service starting', xbmc.LOGINFO)
+
     player = SkipIntroPlayer()
     monitor = xbmc.Monitor()
 
     try:
         # Main service loop
         while not monitor.abortRequested():
-            if monitor.waitForAbort(0.5):  # Check every 500ms
+            if monitor.waitForAbort(MONITOR_INTERVAL_SEC):
                 break
-                
-            if player.isPlaying() and player.timer_active:
+
+            if player.isPlaying() and (player.timer_active or player.warning_timer_active or player.dismiss_timer_active):
                 try:
                     time = player.getTime()
                     player.onPlayBackTime(time)
                 except Exception as e:
                     xbmc.log(f'SkipIntro: Error checking playback time: {str(e)}', xbmc.LOGERROR)
-                
+
     except Exception as e:
         xbmc.log(f'SkipIntro: Error in main loop: {str(e)}', xbmc.LOGERROR)
     finally:

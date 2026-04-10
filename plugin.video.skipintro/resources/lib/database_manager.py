@@ -1,0 +1,461 @@
+import xbmc
+import xbmcgui
+import xbmcaddon
+import xbmcvfs
+import json
+import os
+import shutil
+from datetime import datetime
+from resources.lib.database import ShowDatabase
+
+
+class DatabaseManager:
+    """Handles database backup, restore, import, and export operations"""
+
+    def __init__(self, addon_id=None):
+        # Accept explicit addon ID for RunScript context
+        if addon_id:
+            self.addon = xbmcaddon.Addon(addon_id)
+        else:
+            self.addon = xbmcaddon.Addon()
+
+        self.addon_data_path = xbmcvfs.translatePath(
+            'special://userdata/addon_data/plugin.video.skipintro/'
+        )
+        # Database path is now fixed (not user-configurable)
+        self.db_path = xbmcvfs.translatePath(
+            'special://userdata/addon_data/plugin.video.skipintro/shows.db'
+        )
+
+        # Ensure addon data directory exists
+        if not xbmcvfs.exists(self.addon_data_path):
+            xbmcvfs.mkdirs(self.addon_data_path)
+
+    def _get_backup_restore_path(self):
+        """Get backup/restore path from settings, with fallback to default"""
+        custom_path = self.addon.getSetting('backup_restore_path')
+        xbmc.log(f'SkipIntro: backup_restore_path setting = "{custom_path}"', xbmc.LOGINFO)
+
+        if custom_path and custom_path.strip():
+            path = xbmcvfs.translatePath(custom_path)
+            xbmc.log(f'SkipIntro: Using custom backup path: {path}', xbmc.LOGINFO)
+            # Ensure path ends with separator
+            if not path.endswith(os.sep):
+                path += os.sep
+            return path
+
+        xbmc.log(f'SkipIntro: Using default backup path: {self.addon_data_path}', xbmc.LOGINFO)
+        return self.addon_data_path
+
+    def backup_database(self):
+        """Create a backup of the database with timestamp"""
+        try:
+            if not xbmcvfs.exists(self.db_path):
+                xbmcgui.Dialog().notification(
+                    'Skip Intro',
+                    'No database found to backup',
+                    xbmcgui.NOTIFICATION_WARNING
+                )
+                return False
+
+            # Get backup/restore directory from settings
+            backup_dir = self._get_backup_restore_path()
+
+            # Create backup filename with timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_filename = f'shows_backup_{timestamp}.db'
+            backup_path = os.path.join(backup_dir, backup_filename)
+
+            # Copy database file
+            if xbmcvfs.copy(self.db_path, backup_path):
+                xbmc.log(f'SkipIntro: Database backed up to {backup_path}', xbmc.LOGINFO)
+                xbmcgui.Dialog().notification(
+                    'Skip Intro',
+                    f'Database backed up successfully',
+                    xbmcgui.NOTIFICATION_INFO,
+                    5000
+                )
+                return True
+            else:
+                raise Exception('Failed to copy database file')
+
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Backup failed: {str(e)}', xbmc.LOGERROR)
+            xbmcgui.Dialog().notification(
+                'Skip Intro',
+                f'Backup failed: {str(e)}',
+                xbmcgui.NOTIFICATION_ERROR
+            )
+            return False
+
+    def restore_database(self):
+        """Restore database from a backup file"""
+        try:
+            dialog = xbmcgui.Dialog()
+
+            # Get backup/restore directory from settings
+            restore_dir = self._get_backup_restore_path()
+
+            # Let user browse for backup file (type 1 = ShowAndGetFile, 'files' allows SMB/NFS)
+            backup_file = dialog.browse(
+                1,  # Type: ShowAndGetFile
+                'Select backup file to restore',
+                'files',
+                '.db',
+                False,
+                False,
+                restore_dir
+            )
+
+            if not backup_file:
+                return False
+
+            # Confirm restore action
+            if not dialog.yesno(
+                'Restore Database',
+                'This will replace your current database.',
+                'All current show configurations will be lost.',
+                'Are you sure you want to continue?'
+            ):
+                return False
+
+            # Backup current database before restoring
+            if xbmcvfs.exists(self.db_path):
+                current_backup = self.db_path + '.before_restore'
+                xbmcvfs.copy(self.db_path, current_backup)
+                xbmc.log(f'SkipIntro: Current database backed up to {current_backup}', xbmc.LOGINFO)
+
+            # Restore from backup
+            if xbmcvfs.copy(backup_file, self.db_path):
+                xbmc.log(f'SkipIntro: Database restored from {backup_file}', xbmc.LOGINFO)
+                dialog.notification(
+                    'Skip Intro',
+                    'Database restored successfully',
+                    xbmcgui.NOTIFICATION_INFO,
+                    5000
+                )
+                return True
+            else:
+                raise Exception('Failed to copy backup file')
+
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Restore failed: {str(e)}', xbmc.LOGERROR)
+            xbmcgui.Dialog().notification(
+                'Skip Intro',
+                f'Restore failed: {str(e)}',
+                xbmcgui.NOTIFICATION_ERROR
+            )
+            return False
+
+    def export_to_json(self):
+        """Export database contents to JSON file"""
+        try:
+            if not xbmcvfs.exists(self.db_path):
+                xbmcgui.Dialog().notification(
+                    'Skip Intro',
+                    'No database found to export',
+                    xbmcgui.NOTIFICATION_WARNING
+                )
+                return False
+
+            # Get all data from database
+            db = ShowDatabase(self.db_path)
+
+            # Query all shows and their configurations
+            conn = db._get_connection()
+            cursor = conn.cursor()
+
+            # Get shows with their configurations
+            cursor.execute("""
+                SELECT
+                    s.id, s.title, s.created_at,
+                    c.use_chapters, c.intro_start_chapter, c.intro_end_chapter,
+                    c.intro_start_time, c.intro_end_time, c.outro_start_time,
+                    c.created_at as config_created_at
+                FROM shows s
+                LEFT JOIN shows_config c ON s.id = c.show_id
+                ORDER BY s.title
+            """)
+
+            shows_data = []
+            for row in cursor.fetchall():
+                show_data = {
+                    'id': row[0],
+                    'title': row[1],
+                    'created_at': row[2],
+                    'config': {
+                        'use_chapters': bool(row[3]) if row[3] is not None else None,
+                        'intro_start_chapter': row[4],
+                        'intro_end_chapter': row[5],
+                        'intro_start_time': row[6],
+                        'intro_end_time': row[7],
+                        'outro_start_time': row[8],
+                        'config_created_at': row[9]
+                    } if row[3] is not None else None
+                }
+                shows_data.append(show_data)
+
+            conn.close()
+
+            # Get backup/restore directory from settings
+            export_dir = self._get_backup_restore_path()
+
+            # Create export filename with timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            export_filename = f'skipintro_export_{timestamp}.json'
+            export_path = os.path.join(export_dir, export_filename)
+
+            # Write JSON file
+            json_data = {
+                'version': '1.0',
+                'exported_at': timestamp,
+                'shows_count': len(shows_data),
+                'shows': shows_data
+            }
+
+            # Use xbmcvfs.File for SMB/NFS support
+            json_content = json.dumps(json_data, indent=2, ensure_ascii=False)
+            vfs_file = xbmcvfs.File(export_path, 'w')
+            try:
+                vfs_file.write(json_content)
+            finally:
+                vfs_file.close()
+
+            xbmc.log(f'SkipIntro: Database exported to {export_path}', xbmc.LOGINFO)
+            xbmcgui.Dialog().notification(
+                'Skip Intro',
+                f'Exported {len(shows_data)} shows to JSON',
+                xbmcgui.NOTIFICATION_INFO,
+                5000
+            )
+            return True
+
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Export failed: {str(e)}', xbmc.LOGERROR)
+            import traceback
+            xbmc.log(f'SkipIntro: Traceback: {traceback.format_exc()}', xbmc.LOGERROR)
+            xbmcgui.Dialog().notification(
+                'Skip Intro',
+                f'Export failed: {str(e)}',
+                xbmcgui.NOTIFICATION_ERROR
+            )
+            return False
+
+    def import_from_json(self):
+        """Import database contents from JSON file"""
+        try:
+            dialog = xbmcgui.Dialog()
+
+            # Get backup/restore directory from settings
+            import_dir = self._get_backup_restore_path()
+
+            # Let user browse for JSON file (type 1 = ShowAndGetFile, 'files' allows SMB/NFS)
+            json_file = dialog.browse(
+                1,  # Type: ShowAndGetFile
+                'Select JSON file to import',
+                'files',
+                '.json',
+                False,
+                False,
+                import_dir
+            )
+
+            if not json_file:
+                return False
+
+            # Read JSON file using xbmcvfs.File for SMB/NFS support
+            vfs_file = xbmcvfs.File(json_file, 'r')
+            try:
+                json_content = vfs_file.read()
+                json_data = json.loads(json_content)
+            finally:
+                vfs_file.close()
+
+            shows_data = json_data.get('shows', [])
+            if not shows_data:
+                dialog.notification(
+                    'Skip Intro',
+                    'No show data found in JSON file',
+                    xbmcgui.NOTIFICATION_WARNING
+                )
+                return False
+
+            # Ask user about import mode
+            import_mode = dialog.select(
+                'Import Mode',
+                [
+                    'Merge (keep existing, add new)',
+                    'Replace (clear database, import all)'
+                ]
+            )
+
+            if import_mode == -1:
+                return False
+
+            # Confirm import action
+            action_text = 'merge with' if import_mode == 0 else 'replace'
+            if not dialog.yesno(
+                'Import Database',
+                f'This will {action_text} your current database.',
+                f'Import {len(shows_data)} shows from JSON?'
+            ):
+                return False
+
+            # Perform import
+            db = ShowDatabase(self.db_path)
+
+            if import_mode == 1:  # Replace mode
+                # Clear existing data
+                conn = db._get_connection()
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM shows_config')
+                cursor.execute('DELETE FROM shows')
+                conn.commit()
+                conn.close()
+                xbmc.log('SkipIntro: Cleared existing database for replace mode', xbmc.LOGINFO)
+
+            # Import shows
+            imported_count = 0
+            skipped_count = 0
+
+            conn = db._get_connection()
+            cursor = conn.cursor()
+
+            for show_data in shows_data:
+                try:
+                    title = show_data['title']
+                    config = show_data.get('config')
+                    show_created_at = show_data.get('created_at')
+
+                    if not config:
+                        xbmc.log(f'SkipIntro: Skipping {title} - no config', xbmc.LOGDEBUG)
+                        skipped_count += 1
+                        continue
+
+                    # Check if show exists (in merge mode)
+                    if import_mode == 0:  # Merge mode
+                        cursor.execute('SELECT id FROM shows WHERE title = ?', (title,))
+                        existing_show = cursor.fetchone()
+                        if existing_show:
+                            show_id = existing_show[0]
+                            cursor.execute('SELECT show_id FROM shows_config WHERE show_id = ?', (show_id,))
+                            if cursor.fetchone():
+                                xbmc.log(f'SkipIntro: Skipping {title} - already configured', xbmc.LOGDEBUG)
+                                skipped_count += 1
+                                continue
+
+                    # Insert or update show with original timestamp
+                    cursor.execute('SELECT id FROM shows WHERE title = ?', (title,))
+                    existing_show = cursor.fetchone()
+
+                    if existing_show:
+                        show_id = existing_show[0]
+                        # Update existing show timestamp if provided
+                        if show_created_at:
+                            cursor.execute(
+                                'UPDATE shows SET created_at = ? WHERE id = ?',
+                                (show_created_at, show_id)
+                            )
+                    else:
+                        # Insert new show with original timestamp
+                        if show_created_at:
+                            cursor.execute(
+                                'INSERT INTO shows (title, created_at) VALUES (?, ?)',
+                                (title, show_created_at)
+                            )
+                        else:
+                            cursor.execute(
+                                'INSERT INTO shows (title) VALUES (?)',
+                                (title,)
+                            )
+                        show_id = cursor.lastrowid
+
+                    # Save configuration with original timestamp
+                    config_created_at = config.get('config_created_at')
+
+                    if config.get('use_chapters'):
+                        if config_created_at:
+                            cursor.execute('''
+                                INSERT OR REPLACE INTO shows_config
+                                (show_id, use_chapters, intro_start_chapter, intro_end_chapter,
+                                 intro_start_time, intro_end_time, outro_start_time, created_at)
+                                VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?)
+                            ''', (
+                                show_id,
+                                True,
+                                config.get('intro_start_chapter'),
+                                config.get('intro_end_chapter'),
+                                config_created_at
+                            ))
+                        else:
+                            cursor.execute('''
+                                INSERT OR REPLACE INTO shows_config
+                                (show_id, use_chapters, intro_start_chapter, intro_end_chapter,
+                                 intro_start_time, intro_end_time, outro_start_time)
+                                VALUES (?, ?, ?, ?, NULL, NULL, NULL)
+                            ''', (
+                                show_id,
+                                True,
+                                config.get('intro_start_chapter'),
+                                config.get('intro_end_chapter')
+                            ))
+                    else:
+                        if config_created_at:
+                            cursor.execute('''
+                                INSERT OR REPLACE INTO shows_config
+                                (show_id, use_chapters, intro_start_chapter, intro_end_chapter,
+                                 intro_start_time, intro_end_time, outro_start_time, created_at)
+                                VALUES (?, ?, NULL, NULL, ?, ?, ?, ?)
+                            ''', (
+                                show_id,
+                                False,
+                                config.get('intro_start_time'),
+                                config.get('intro_end_time'),
+                                config.get('outro_start_time'),
+                                config_created_at
+                            ))
+                        else:
+                            cursor.execute('''
+                                INSERT OR REPLACE INTO shows_config
+                                (show_id, use_chapters, intro_start_chapter, intro_end_chapter,
+                                 intro_start_time, intro_end_time, outro_start_time)
+                                VALUES (?, ?, NULL, NULL, ?, ?, ?)
+                            ''', (
+                                show_id,
+                                False,
+                                config.get('intro_start_time'),
+                                config.get('intro_end_time'),
+                                config.get('outro_start_time')
+                            ))
+
+                    imported_count += 1
+                    xbmc.log(f'SkipIntro: Imported {title}', xbmc.LOGDEBUG)
+
+                except Exception as e:
+                    xbmc.log(f'SkipIntro: Failed to import show {show_data.get("title")}: {str(e)}', xbmc.LOGERROR)
+                    import traceback
+                    xbmc.log(f'SkipIntro: Traceback: {traceback.format_exc()}', xbmc.LOGERROR)
+                    continue
+
+            conn.commit()
+            conn.close()
+
+            xbmc.log(f'SkipIntro: Import complete - {imported_count} imported, {skipped_count} skipped', xbmc.LOGINFO)
+            dialog.notification(
+                'Skip Intro',
+                f'Imported {imported_count} shows ({skipped_count} skipped)',
+                xbmcgui.NOTIFICATION_INFO,
+                5000
+            )
+            return True
+
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Import failed: {str(e)}', xbmc.LOGERROR)
+            import traceback
+            xbmc.log(f'SkipIntro: Traceback: {traceback.format_exc()}', xbmc.LOGERROR)
+            xbmcgui.Dialog().notification(
+                'Skip Intro',
+                f'Import failed: {str(e)}',
+                xbmcgui.NOTIFICATION_ERROR
+            )
+            return False

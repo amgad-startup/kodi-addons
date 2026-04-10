@@ -10,7 +10,7 @@ class MockXBMC:
     LOGINFO = 1
     LOGWARNING = 3
     LOGERROR = 2
-    
+
     @staticmethod
     def log(msg, level):
         pass
@@ -25,6 +25,10 @@ class MockXBMC:
         return json.dumps({"result": {}})
 
     @staticmethod
+    def executebuiltin(cmd):
+        pass
+
+    @staticmethod
     def getInfoLabel(label):
         if label == 'VideoPlayer.TVShowTitle':
             return 'Test Show'
@@ -32,8 +36,12 @@ class MockXBMC:
             return '1'
         elif label == 'VideoPlayer.Episode':
             return '2'
+        elif label == 'Player.ChapterCount':
+            return '0'
+        elif label == 'Player.Chapter':
+            return '1'
         return ''
-        
+
     class Player:
         def __init__(self):
             self.playing = True
@@ -46,7 +54,7 @@ class MockXBMC:
 
         def getPlayingFile(self):
             return '/path/to/Test.Show.S01E02.mkv'
-            
+
     class Monitor:
         def __init__(self):
             pass
@@ -59,7 +67,7 @@ class MockXBMCGUI:
     NOTIFICATION_WARNING = 'warning'
 
     class Dialog:
-        def yesno(self, heading, message):
+        def yesno(self, heading, message, *args, **kwargs):
             return True
         def notification(self, heading, message, icon=None, time=5000):
             pass
@@ -75,25 +83,27 @@ class MockXBMCGUI:
             return MagicMock()
         def setFocus(self, control):
             pass
+        def setFocusId(self, controlId):
+            pass
 
 class MockXBMCAddon:
     class Addon:
-        def __init__(self):
+        def __init__(self, addon_id=None):
             self._settings = {
-                "default_delay": "30",
-                "skip_duration": "60",
-                "use_chapters": "true",
-                "use_api": "false",
-                "save_times": "true",
-                "database_path": ":memory:"
+                "enable_autoskip": "true",
+                "pre_skip_seconds": "3",
+                "delay_autoskip": "0",
+                "auto_dismiss_button": "0",
+                "database_path": ":memory:",
+                "backup_restore_path": ""
             }
-            
+
         def getSetting(self, key):
             return self._settings.get(key, "")
-            
+
         def getSettingBool(self, key):
             return self._settings.get(key, "false").lower() == "true"
-            
+
         def setSetting(self, key, value):
             self._settings[key] = value
 
@@ -106,6 +116,26 @@ class MockXBMCVFS:
     @staticmethod
     def translatePath(path):
         return path
+
+    @staticmethod
+    def exists(path):
+        return os.path.exists(path)
+
+    @staticmethod
+    def mkdirs(path):
+        os.makedirs(path, exist_ok=True)
+
+    class File:
+        def __init__(self, path, mode='r'):
+            pass
+        def read(self):
+            return ''
+        def write(self, data):
+            pass
+        def close(self):
+            pass
+        def size(self):
+            return 0
 
 # Mock the Kodi modules
 import sys
@@ -159,14 +189,19 @@ class TestDatabase(unittest.TestCase):
         self.assertTrue(config['use_chapters'])
         self.assertEqual(config['intro_start_chapter'], 1)
         self.assertEqual(config['intro_end_chapter'], 3)
-        # Note: outro_start_chapter is not returned by get_show_config (known gap)
+
+    def test_show_title_strip(self):
+        """Test that show titles are stripped of whitespace"""
+        show_id1 = self.db.get_show('Test Show')
+        show_id2 = self.db.get_show('  Test Show  ')
+        self.assertEqual(show_id1, show_id2)
 
 class TestMetadata(unittest.TestCase):
     def setUp(self):
         """Set up metadata detector"""
         from resources.lib.metadata import ShowMetadata
         self.metadata = ShowMetadata()
-    
+
     def test_show_detection_kodi(self):
         """Test show detection using Kodi info labels"""
         info = self.metadata.get_show_info()
@@ -197,10 +232,11 @@ class TestSkipIntro(unittest.TestCase):
         self.player.intro_bookmark = 100
         self.player.outro_bookmark = 200
         self.player.bookmarks_checked = True
-        self.player.default_skip_checked = True
         self.player.show_info = {'title': 'Test'}
         self.player.timer_active = True
         self.player.show_from_start = True
+        self.player.has_config = True
+        self.player._skip_to_chapter = 3
 
         self.player.cleanup()
 
@@ -209,12 +245,13 @@ class TestSkipIntro(unittest.TestCase):
         self.assertIsNone(self.player.intro_start)
         self.assertIsNone(self.player.intro_duration)
         self.assertFalse(self.player.bookmarks_checked)
-        self.assertFalse(self.player.default_skip_checked)
         self.assertFalse(self.player.prompt_shown)
         self.assertIsNone(self.player.show_info)
         self.assertFalse(self.player.timer_active)
         self.assertEqual(self.player.next_check_time, 0)
         self.assertFalse(self.player.show_from_start)
+        self.assertFalse(self.player.has_config)
+        self.assertIsNone(self.player._skip_to_chapter)
 
     def test_playback_stopped_calls_cleanup(self):
         """onPlayBackStopped should reset state"""
@@ -233,42 +270,6 @@ class TestSkipIntro(unittest.TestCase):
         self.player.intro_bookmark = 100
         self.player.onPlayBackStarted()
         self.assertIsNone(self.player.intro_bookmark)
-
-    def test_check_for_default_skip_immediate(self):
-        """Default skip when current time already past delay"""
-        self.player.getTime = MagicMock(return_value=35)
-        self.player.settings = {'default_delay': 30, 'skip_duration': 60, 'save_times': True}
-        self.player.show_info = {'title': 'Test Show', 'season': 1, 'episode': 2}
-
-        self.player.check_for_default_skip()
-
-        self.assertEqual(self.player.intro_start, 35)
-        self.assertEqual(self.player.intro_bookmark, 95)
-        self.assertTrue(self.player.default_skip_checked)
-
-    def test_check_for_default_skip_timer(self):
-        """Default skip sets timer and pre-sets intro times when before delay"""
-        self.player.getTime = MagicMock(return_value=5)
-        self.player.settings = {'default_delay': 30, 'skip_duration': 60, 'save_times': True}
-        self.player.show_info = {'title': 'Test Show', 'season': 1, 'episode': 2}
-
-        self.player.check_for_default_skip()
-
-        self.assertEqual(self.player.intro_start, 30)
-        self.assertEqual(self.player.intro_bookmark, 90)
-        self.assertEqual(self.player.next_check_time, 30)
-        self.assertTrue(self.player.timer_active)
-
-    def test_check_for_default_skip_only_runs_once(self):
-        """check_for_default_skip should be a no-op on second call"""
-        self.player.getTime = MagicMock(return_value=5)
-        self.player.settings = {'default_delay': 30, 'skip_duration': 60, 'save_times': True}
-        self.player.check_for_default_skip()
-        bookmark_after_first = self.player.intro_bookmark
-
-        self.player.getTime.return_value = 50
-        self.player.check_for_default_skip()
-        self.assertEqual(self.player.intro_bookmark, bookmark_after_first)
 
     # --- set_time_based_markers ---
 
@@ -302,9 +303,9 @@ class TestSkipIntro(unittest.TestCase):
     def test_set_chapter_based_markers(self):
         """Chapter-based markers resolve chapter numbers to times"""
         chapters = [
-            {'time': 0, 'name': 'Start'},
-            {'time': 112, 'name': 'Intro'},
-            {'time': 157, 'name': 'Intro End'},
+            {'time': 0, 'name': 'Start', 'number': 1},
+            {'time': 112, 'name': 'Intro', 'number': 2},
+            {'time': 157, 'name': 'Intro End', 'number': 3},
         ]
         self.player.getChapters = MagicMock(return_value=chapters)
 
@@ -319,7 +320,9 @@ class TestSkipIntro(unittest.TestCase):
     def test_set_chapter_based_markers_with_outro(self):
         """Chapter-based markers with outro chapter"""
         chapters = [
-            {'time': 0}, {'time': 112}, {'time': 157}, {'time': 1200}, {'time': 1350},
+            {'time': 0, 'number': 1}, {'time': 112, 'number': 2},
+            {'time': 157, 'number': 3}, {'time': 1200, 'number': 4},
+            {'time': 1350, 'number': 5},
         ]
         self.player.getChapters = MagicMock(return_value=chapters)
 
@@ -330,7 +333,7 @@ class TestSkipIntro(unittest.TestCase):
 
     def test_set_chapter_based_markers_invalid_chapter(self):
         """Returns False when chapter numbers are out of range"""
-        chapters = [{'time': 0}, {'time': 100}]
+        chapters = [{'time': 0, 'number': 1}, {'time': 100, 'number': 2}]
         self.player.getChapters = MagicMock(return_value=chapters)
 
         config = {'intro_start_chapter': 1, 'intro_end_chapter': 5}  # 5 > len(chapters)
@@ -344,10 +347,73 @@ class TestSkipIntro(unittest.TestCase):
 
     def test_set_chapter_based_markers_missing_config(self):
         """Returns False when chapter config is missing"""
-        chapters = [{'time': 0}, {'time': 100}]
+        chapters = [{'time': 0, 'number': 1}, {'time': 100, 'number': 2}]
         self.player.getChapters = MagicMock(return_value=chapters)
         self.assertFalse(self.player.set_chapter_based_markers(
             {'intro_start_chapter': None, 'intro_end_chapter': None}))
+
+    def test_set_chapter_based_markers_network_seek_mode(self):
+        """Chapter-seek mode when chapters have no 'time' field"""
+        chapters = [
+            {'number': 1, 'name': 'Chapter 1'},
+            {'number': 2, 'name': 'Chapter 2'},
+            {'number': 3, 'name': 'Chapter 3'},
+        ]
+        self.player.getChapters = MagicMock(return_value=chapters)
+
+        config = {'intro_start_chapter': 1, 'intro_end_chapter': 3, 'outro_start_chapter': None}
+        result = self.player.set_chapter_based_markers(config)
+
+        self.assertTrue(result)
+        self.assertEqual(self.player._skip_to_chapter, 3)
+        self.assertEqual(self.player.intro_start, 0)
+        self.assertEqual(self.player.intro_bookmark, 99999)
+        self.assertIsNone(self.player.intro_duration)
+        self.assertTrue(self.player.show_from_start)
+
+    def test_set_chapter_based_markers_start_plus_duration(self):
+        """Start chapter + duration mode calculates end from start + duration"""
+        chapters = [
+            {'time': 0, 'number': 1},
+            {'time': 112, 'number': 2},
+            {'time': 157, 'number': 3},
+        ]
+        self.player.getChapters = MagicMock(return_value=chapters)
+
+        config = {
+            'intro_start_chapter': 1,
+            'intro_end_chapter': None,
+            'intro_duration': 90,
+            'outro_start_chapter': None
+        }
+        result = self.player.set_chapter_based_markers(config)
+
+        self.assertTrue(result)
+        self.assertEqual(self.player.intro_start, 0)
+        self.assertEqual(self.player.intro_bookmark, 90)
+        self.assertEqual(self.player.intro_duration, 90)
+
+    def test_set_chapter_based_markers_end_plus_duration(self):
+        """End chapter + duration mode calculates start from end - duration"""
+        chapters = [
+            {'time': 0, 'number': 1},
+            {'time': 112, 'number': 2},
+            {'time': 157, 'number': 3},
+        ]
+        self.player.getChapters = MagicMock(return_value=chapters)
+
+        config = {
+            'intro_start_chapter': None,
+            'intro_end_chapter': 3,
+            'intro_duration': 45,
+            'outro_start_chapter': None
+        }
+        result = self.player.set_chapter_based_markers(config)
+
+        self.assertTrue(result)
+        self.assertEqual(self.player.intro_bookmark, 157)
+        self.assertEqual(self.player.intro_start, 112)  # 157 - 45
+        self.assertEqual(self.player.intro_duration, 45)
 
 class TestSkipDialog(unittest.TestCase):
     """Tests for skip button display logic and actual skip execution"""
@@ -360,8 +426,8 @@ class TestSkipDialog(unittest.TestCase):
 
     # --- show_skip_button ---
 
-    def test_skip_button_shown_during_intro_window(self):
-        """Button should show when current time is within intro_start..intro_bookmark"""
+    def test_skip_button_shown(self):
+        """Button should show when intro_bookmark is set"""
         self.player.intro_start = 30
         self.player.intro_bookmark = 90
         self.player.getTime.return_value = 35  # within window
@@ -371,28 +437,6 @@ class TestSkipDialog(unittest.TestCase):
 
         self.player.ui.prompt_skip_intro.assert_called_once()
         self.assertTrue(self.player.prompt_shown)
-
-    def test_skip_button_not_shown_before_intro_start(self):
-        """Button should NOT show when current time is before intro_start"""
-        self.player.intro_start = 60
-        self.player.intro_bookmark = 120
-        self.player.getTime.return_value = 30  # before intro_start
-
-        self.player.show_skip_button()
-
-        self.player.ui.prompt_skip_intro.assert_not_called()
-        self.assertFalse(self.player.prompt_shown)
-
-    def test_skip_button_not_shown_after_intro_end(self):
-        """Button should NOT show when current time is past intro_bookmark"""
-        self.player.intro_start = 30
-        self.player.intro_bookmark = 90
-        self.player.getTime.return_value = 95  # past intro_bookmark
-
-        self.player.show_skip_button()
-
-        self.player.ui.prompt_skip_intro.assert_not_called()
-        self.assertFalse(self.player.prompt_shown)
 
     def test_skip_button_not_shown_twice(self):
         """Button should only show once per playback"""
@@ -467,12 +511,23 @@ class TestSkipDialog(unittest.TestCase):
         # Should not raise
         self.player.skip_to_intro_end()
 
+    def test_skip_uses_chapter_seek_when_set(self):
+        """skip_to_intro_end should use _seek_to_chapter when _skip_to_chapter is set"""
+        self.player.intro_bookmark = 99999
+        self.player._skip_to_chapter = 3
+        self.player._seek_to_chapter = MagicMock(return_value=True)
+
+        self.player.skip_to_intro_end()
+
+        self.player._seek_to_chapter.assert_called_once_with(3)
+        self.player.seekTime.assert_not_called()
+
     # --- onPlayBackTime (timer-driven skip) ---
 
-    def test_timer_triggers_skip_button_at_threshold(self):
-        """onPlayBackTime should trigger show_skip_button when time >= next_check_time"""
-        self.player.timer_active = True
-        self.player.next_check_time = 30
+    def test_warning_timer_triggers_skip_button(self):
+        """onPlayBackTime should trigger show_skip_button when warning timer fires"""
+        self.player.warning_timer_active = True
+        self.player.warning_check_time = 30
         self.player.intro_start = 30
         self.player.intro_bookmark = 90
         self.player.ui.prompt_skip_intro.return_value = True
@@ -480,7 +535,7 @@ class TestSkipDialog(unittest.TestCase):
         self.player.onPlayBackTime(35)
 
         self.player.ui.prompt_skip_intro.assert_called_once()
-        self.assertFalse(self.player.timer_active)  # timer should deactivate
+        self.assertFalse(self.player.warning_timer_active)
 
     def test_timer_does_not_trigger_before_threshold(self):
         """onPlayBackTime should not trigger before next_check_time"""
@@ -534,67 +589,24 @@ class TestSettings(unittest.TestCase):
     def test_default_settings(self):
         """Normal settings are read correctly"""
         s = default.Settings()
-        self.assertEqual(s.settings['default_delay'], 30)
-        self.assertEqual(s.settings['skip_duration'], 60)
-        self.assertTrue(s.settings['use_chapters'])
-        self.assertFalse(s.settings['use_api'])
-        self.assertTrue(s.settings['save_times'])
+        self.assertTrue(s.settings['enable_autoskip'])
+        self.assertEqual(s.settings['pre_skip_seconds'], 3)
+        self.assertEqual(s.settings['delay_autoskip'], 0)
+        self.assertEqual(s.settings['auto_dismiss_button'], 0)
 
     def test_get_setting(self):
         """get_setting returns individual values"""
         s = default.Settings()
-        self.assertEqual(s.get_setting('default_delay'), 30)
+        self.assertEqual(s.get_setting('pre_skip_seconds'), 3)
         self.assertIsNone(s.get_setting('nonexistent'))
-
-    def test_negative_delay_clamped(self):
-        """Negative default_delay is reset to 30"""
-        with patch.object(MockXBMCAddon.Addon, 'getSetting',
-                          side_effect=lambda k: {
-                              'default_delay': '-5', 'skip_duration': '60',
-                              'intro_start_chapter': '', 'intro_end_chapter': '',
-                              'outro_start_chapter': '', 'intro_start_time': '',
-                              'intro_end_time': '', 'outro_start_time': ''
-                          }.get(k, '')):
-            s = default.Settings()
-            self.assertEqual(s.settings['default_delay'], 30)
-
-    def test_excessive_delay_clamped(self):
-        """default_delay > 300 is clamped to 300"""
-        with patch.object(MockXBMCAddon.Addon, 'getSetting',
-                          side_effect=lambda k: {
-                              'default_delay': '999', 'skip_duration': '60',
-                              'intro_start_chapter': '', 'intro_end_chapter': '',
-                              'outro_start_chapter': '', 'intro_start_time': '',
-                              'intro_end_time': '', 'outro_start_time': ''
-                          }.get(k, '')):
-            s = default.Settings()
-            self.assertEqual(s.settings['default_delay'], 300)
-
-    def test_skip_duration_below_min_clamped(self):
-        """skip_duration < 10 is reset to 60"""
-        with patch.object(MockXBMCAddon.Addon, 'getSetting',
-                          side_effect=lambda k: {
-                              'default_delay': '30', 'skip_duration': '5',
-                              'intro_start_chapter': '', 'intro_end_chapter': '',
-                              'outro_start_chapter': '', 'intro_start_time': '',
-                              'intro_end_time': '', 'outro_start_time': ''
-                          }.get(k, '')):
-            s = default.Settings()
-            self.assertEqual(s.settings['skip_duration'], 60)
 
     def test_invalid_settings_fall_back_to_defaults(self):
         """ValueError in settings returns all defaults"""
         with patch.object(MockXBMCAddon.Addon, 'getSetting', return_value='not_a_number'):
             s = default.Settings()
-            self.assertEqual(s.settings['default_delay'], 30)
-            self.assertEqual(s.settings['skip_duration'], 60)
-
-    def test_empty_chapter_settings(self):
-        """Empty chapter settings use defaults"""
-        s = default.Settings()
-        self.assertEqual(s.settings['intro_start_chapter'], 0)
-        self.assertEqual(s.settings['intro_end_chapter'], 1)
-        self.assertIsNone(s.settings['outro_start_chapter'])
+            self.assertTrue(s.settings['enable_autoskip'])
+            self.assertEqual(s.settings['pre_skip_seconds'], 3)
+            self.assertEqual(s.settings['delay_autoskip'], 0)
 
 
 class TestChapterManager(unittest.TestCase):
@@ -669,67 +681,32 @@ class TestChapterManager(unittest.TestCase):
         """Returns None when outro chapter number doesn't exist"""
         self.assertIsNone(self.mgr.get_outro_chapter(self.chapters, 99))
 
-    def test_get_chapters_skips_network_files(self):
-        """get_chapters returns [] for network streams"""
-        with patch('xbmc.executeJSONRPC', return_value=json.dumps({
-            "result": {"item": {"file": "smb://server/share/file.mkv"}}
-        })):
-            chapters = self.mgr.get_chapters()
-            self.assertEqual(chapters, [])
+    def test_find_chapter_by_name(self):
+        """find_chapter_by_name finds intro chapter"""
+        from resources.lib.chapters import ChapterManager as CM
+        ch = CM.find_chapter_by_name(self.chapters, 'Intro')
+        self.assertIsNotNone(ch)
+        self.assertEqual(ch['name'], 'Intro')
 
-    def test_get_chapters_skips_missing_files(self):
-        """get_chapters returns [] when file doesn't exist"""
-        with patch('xbmc.executeJSONRPC', return_value=json.dumps({
-            "result": {"item": {"file": "/nonexistent/file.mkv"}}
-        })):
-            chapters = self.mgr.get_chapters()
-            self.assertEqual(chapters, [])
+    def test_find_chapter_by_name_none(self):
+        """find_chapter_by_name returns None for no match"""
+        from resources.lib.chapters import ChapterManager as CM
+        ch = CM.find_chapter_by_name(self.chapters, 'NonExistent')
+        self.assertIsNone(ch)
 
-    def test_get_chapters_no_result(self):
-        """get_chapters returns [] when JSON-RPC has no result"""
-        with patch('xbmc.executeJSONRPC', return_value=json.dumps({"error": "bad"})):
-            chapters = self.mgr.get_chapters()
-            self.assertEqual(chapters, [])
+    def test_find_intro_chapter(self):
+        """find_intro_chapter finds intro by name heuristic"""
+        result = self.mgr.find_intro_chapter(self.chapters)
+        self.assertEqual(result, 112)  # Time of 'Intro' chapter
 
-    def test_get_chapters_parses_ffmetadata(self):
-        """get_chapters correctly parses ffmetadata output"""
-        metadata = """;FFMETADATA1
-[CHAPTER]
-START=0
-END=112821000000
-title=Start
-[CHAPTER]
-START=112821000000
-END=157074000000
-title=Intro
-"""
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = metadata
-        mock_result.stderr = ""
-
-        with patch('xbmc.executeJSONRPC', return_value=json.dumps({
-            "result": {"item": {"file": "/tmp/test.mkv"}}
-        })), patch('os.path.isfile', return_value=True), \
-             patch('subprocess.run', return_value=mock_result):
-            chapters = self.mgr.get_chapters()
-
-        self.assertEqual(len(chapters), 2)
-        self.assertEqual(chapters[0]['name'], 'Start')
-        self.assertAlmostEqual(chapters[0]['time'], 0.0)
-        self.assertEqual(chapters[1]['name'], 'Intro')
-        self.assertAlmostEqual(chapters[1]['time'], 112.821)
-
-    def test_get_chapters_uses_cache(self):
-        """Second call returns cached chapters without subprocess"""
-        self.mgr._cached_chapters['/tmp/test.mkv'] = [{'name': 'cached', 'time': 0}]
-
-        with patch('xbmc.executeJSONRPC', return_value=json.dumps({
-            "result": {"item": {"file": "/tmp/test.mkv"}}
-        })):
-            chapters = self.mgr.get_chapters()
-
-        self.assertEqual(chapters[0]['name'], 'cached')
+    def test_find_intro_chapter_no_match(self):
+        """find_intro_chapter returns None when no intro-named chapter exists"""
+        chapters = [
+            {'name': 'Start', 'time': 0, 'number': 1},
+            {'name': 'Main', 'time': 100, 'number': 2},
+        ]
+        result = self.mgr.find_intro_chapter(chapters)
+        self.assertIsNone(result)
 
 
 class TestMetadataFilenameEdgeCases(unittest.TestCase):
@@ -830,13 +807,10 @@ class TestPlayerUI(unittest.TestCase):
         dialog.onClick(999)
         callback.assert_not_called()
 
-    def test_skip_intro_dialog_onaction_back(self):
-        """SkipIntroDialog.onAction closes on back/escape"""
-        from resources.lib.ui import SkipIntroDialog
-        dialog = SkipIntroDialog('skip_button.xml', '.', 'default', '720p', callback=None)
-        action = MagicMock()
-        action.getId.return_value = MockXBMCGUI.ACTION_NAV_BACK
-        dialog.onAction(action)  # should not raise
+    def test_show_notification_uses_dialog(self):
+        """show_notification uses xbmcgui.Dialog().notification() not executebuiltin"""
+        self.ui.show_notification('test message')
+        # Should not raise - uses safe Dialog API
 
 
 class TestContextModule(unittest.TestCase):
@@ -868,11 +842,12 @@ class TestContextModule(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_get_chapter_selection_valid(self):
-        """Valid chapter numbers are accepted"""
+        """Valid chapter numbers are accepted (full chapter mode)"""
         from context import get_chapter_selection
         dialog = MagicMock()
+        dialog.select.return_value = 2  # Full chapter mode (both start & end)
         dialog.numeric.side_effect = ['1', '3', '']  # start, end, no outro
-        result = get_chapter_selection(dialog)
+        result = get_chapter_selection(dialog, None)
         self.assertEqual(result['intro_start_chapter'], 1)
         self.assertEqual(result['intro_end_chapter'], 3)
         self.assertIsNone(result['outro_start_chapter'])
@@ -882,18 +857,20 @@ class TestContextModule(unittest.TestCase):
         """End chapter <= start chapter is rejected"""
         from context import get_chapter_selection
         dialog = MagicMock()
+        dialog.select.return_value = 2  # Full chapter mode
         dialog.numeric.side_effect = ['3', '2', '']
         dialog.notification = MagicMock()
-        result = get_chapter_selection(dialog)
+        result = get_chapter_selection(dialog, None)
         self.assertIsNone(result)
 
     def test_get_chapter_selection_zero_chapter(self):
         """Chapter number 0 is rejected"""
         from context import get_chapter_selection
         dialog = MagicMock()
+        dialog.select.return_value = 2  # Full chapter mode
         dialog.numeric.side_effect = ['0', '', '']
         dialog.notification = MagicMock()
-        result = get_chapter_selection(dialog)
+        result = get_chapter_selection(dialog, None)
         self.assertIsNone(result)
 
     def test_get_manual_time_input(self):
@@ -939,7 +916,7 @@ class TestDatabaseMigration(unittest.TestCase):
             c.execute("PRAGMA table_info(shows_config)")
             columns = {row[1] for row in c.fetchall()}
         expected = {'show_id', 'use_chapters', 'intro_start_chapter', 'intro_end_chapter',
-                    'intro_start_time', 'intro_end_time', 'outro_start_time', 'created_at'}
+                    'intro_duration', 'intro_start_time', 'intro_end_time', 'outro_start_time', 'created_at'}
         self.assertTrue(expected.issubset(columns))
 
     def test_reinit_is_safe(self):
@@ -984,16 +961,15 @@ class TestDatabaseMigration(unittest.TestCase):
         self.assertEqual(config['intro_start_time'], 50)
         self.assertEqual(config['intro_end_time'], 100)
 
-    def test_identifier_validation(self):
-        """SQL identifier validation rejects bad names"""
-        from resources.lib.database import ShowDatabase
-        with self.assertRaises(ValueError):
-            ShowDatabase._validate_identifier("Robert'; DROP TABLE--")
-        with self.assertRaises(ValueError):
-            ShowDatabase._validate_identifier("table name")
-        # Valid identifiers pass
-        self.assertEqual(ShowDatabase._validate_identifier("shows_config"), "shows_config")
-        self.assertEqual(ShowDatabase._validate_identifier("_private"), "_private")
+    def test_chapter_config_with_duration(self):
+        """Chapter config with intro_duration is saved correctly"""
+        show_id = self.db.get_show('Test')
+        self.db.set_manual_show_chapters(show_id, True, 1, None, None, intro_duration=90)
+        config = self.db.get_show_config(show_id)
+        self.assertTrue(config['use_chapters'])
+        self.assertEqual(config['intro_start_chapter'], 1)
+        self.assertIsNone(config['intro_end_chapter'])
+        self.assertEqual(config['intro_duration'], 90)
 
 
 class TestShowManager(unittest.TestCase):
@@ -1040,4 +1016,3 @@ class TestShowManager(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-

@@ -25,6 +25,7 @@ if [ -d "$CONFIG_SRC" ]; then
     cp -f "$CONFIG_SRC"/advancedsettings.xml "$KODI_USERDATA"/ 2>/dev/null || true
     cp -f "$CONFIG_SRC"/sources.xml "$KODI_USERDATA"/ 2>/dev/null || true
     cp -f "$CONFIG_SRC"/guisettings.xml "$KODI_USERDATA"/ 2>/dev/null || true
+    cp -f "$CONFIG_SRC"/passwords.xml "$KODI_USERDATA"/ 2>/dev/null || true
     echo "==> Configuration applied"
 fi
 
