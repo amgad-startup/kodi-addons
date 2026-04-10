@@ -318,7 +318,8 @@ def save_user_times():
         xbmcgui.Dialog().notification('Skip Intro', 'No item selected', xbmcgui.NOTIFICATION_ERROR)
         return
 
-    xbmc.log(f'SkipIntro: Selected item info: {item}', xbmc.LOGINFO)
+    from resources.lib.metadata import sanitize_path
+    xbmc.log(f'SkipIntro: Selected item: {item["showtitle"]} S{item["season"]}E{item["episode"]}', xbmc.LOGINFO)
 
     # Initialize database
     xbmc.log('SkipIntro: Initializing database', xbmc.LOGINFO)

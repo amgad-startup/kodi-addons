@@ -1,3 +1,6 @@
+<!-- WARNING: Test container config only. Do NOT publish ports without changing
+     credentials. This enables Kodi's web server on all interfaces with default
+     test credentials for local development use only. -->
 <advancedsettings>
   <services>
     <webserver>true</webserver>

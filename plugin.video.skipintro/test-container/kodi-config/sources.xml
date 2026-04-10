@@ -2,8 +2,8 @@
   <video>
     <default pathversion="1"></default>
     <source>
-      <name>TV Shows (sweetnas)</name>
-      <path pathversion="1">smb://amgad:efta7YaNas66%5E@192.168.1.21/sweetnas/skipintro_addon/tv-shows-test/</path>
+      <name>TV Shows (NAS)</name>
+      <path pathversion="1">smb://YOUR_USER:YOUR_PASS@YOUR_NAS_IP/share/path/</path>
       <allowsharing>true</allowsharing>
     </source>
     <source>

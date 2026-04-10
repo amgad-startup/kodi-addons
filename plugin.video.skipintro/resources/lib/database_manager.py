@@ -292,15 +292,25 @@ class DatabaseManager:
             if not json_file:
                 return False
 
-            # Read JSON file using xbmcvfs.File for SMB/NFS support
+            # Read JSON file with size limit to prevent memory exhaustion
+            MAX_IMPORT_SIZE = 10 * 1024 * 1024  # 10MB
+            MAX_IMPORT_SHOWS = 5000
+
             vfs_file = xbmcvfs.File(json_file, 'r')
             try:
+                file_size = vfs_file.size()
+                if file_size > MAX_IMPORT_SIZE:
+                    dialog.notification('Skip Intro', 'Import file too large (max 10MB)', xbmcgui.NOTIFICATION_ERROR)
+                    return False
                 json_content = vfs_file.read()
                 json_data = json.loads(json_content)
             finally:
                 vfs_file.close()
 
             shows_data = json_data.get('shows', [])
+            if len(shows_data) > MAX_IMPORT_SHOWS:
+                xbmc.log(f'SkipIntro: Import truncated from {len(shows_data)} to {MAX_IMPORT_SHOWS} shows', xbmc.LOGWARNING)
+                shows_data = shows_data[:MAX_IMPORT_SHOWS]
             if not shows_data:
                 dialog.notification(
                     'Skip Intro',

@@ -5,8 +5,8 @@ import xbmcvfs
 
 
 def sanitize_path(path):
-    """Remove credentials from SMB/NFS URLs for safe logging."""
-    return re.sub(r'(smb://|nfs://)[^:]+:[^@]+@', r'\1***:***@', str(path))
+    """Remove credentials from any scheme://user:pass@host URL for safe logging."""
+    return re.sub(r'(://)[^:]+:[^@]+@', r'\1***:***@', str(path))
 
 class ShowMetadata:
     def __init__(self):
@@ -39,7 +39,7 @@ class ShowMetadata:
                 xbmc.log('SkipIntro: No filename available for parsing', xbmc.LOGWARNING)
                 return None
             
-            xbmc.log(f'SkipIntro: Attempting to parse filename: {filename}', xbmc.LOGINFO)    
+            xbmc.log(f'SkipIntro: Attempting to parse filename: {sanitize_path(filename)}', xbmc.LOGINFO)    
             return self._parse_filename(filename)
             
         except Exception as e:
