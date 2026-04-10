@@ -309,8 +309,13 @@ class DatabaseManager:
 
             shows_data = json_data.get('shows', [])
             if len(shows_data) > MAX_IMPORT_SHOWS:
-                xbmc.log(f'SkipIntro: Import truncated from {len(shows_data)} to {MAX_IMPORT_SHOWS} shows', xbmc.LOGWARNING)
-                shows_data = shows_data[:MAX_IMPORT_SHOWS]
+                dialog.notification(
+                    'Skip Intro',
+                    f'Import rejected: {len(shows_data)} shows exceeds {MAX_IMPORT_SHOWS} limit',
+                    xbmcgui.NOTIFICATION_ERROR
+                )
+                xbmc.log(f'SkipIntro: Import rejected — {len(shows_data)} shows exceeds limit of {MAX_IMPORT_SHOWS}', xbmc.LOGWARNING)
+                return False
             if not shows_data:
                 dialog.notification(
                     'Skip Intro',

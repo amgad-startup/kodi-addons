@@ -17,3 +17,4 @@ __pycache__/
 # Dev utilities (not part of the addon)
 **/reload.py
 **/clear_configs.py
+**/player.html

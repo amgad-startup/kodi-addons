@@ -2,7 +2,12 @@ import unittest
 import tempfile
 import os
 import json
+import warnings
 from unittest.mock import MagicMock, patch
+
+# Suppress sqlite3 ResourceWarnings from mock teardown GC — the actual code
+# properly closes connections via context managers and ShowDatabase.close().
+warnings.filterwarnings('ignore', category=ResourceWarning, message='unclosed database')
 
 # Mock Kodi modules
 class MockXBMC:
@@ -156,6 +161,7 @@ class TestDatabase(unittest.TestCase):
         self.db = ShowDatabase(self.tmp.name)
 
     def tearDown(self):
+        self.db.close()
         os.unlink(self.tmp.name)
 
     def test_show_create_and_lookup(self):
@@ -226,6 +232,10 @@ class TestMetadata(unittest.TestCase):
 class TestSkipIntro(unittest.TestCase):
     def setUp(self):
         self.player = default.SkipIntroPlayer()
+
+    def tearDown(self):
+        if self.player.db:
+            self.player.db.close()
 
     def test_cleanup(self):
         """Test cleanup resets all state"""
@@ -423,6 +433,10 @@ class TestSkipDialog(unittest.TestCase):
         self.player.getTime = MagicMock(return_value=35)
         self.player.seekTime = MagicMock()
         self.player.ui = MagicMock()
+
+    def tearDown(self):
+        if self.player.db:
+            self.player.db.close()
 
     # --- show_skip_button ---
 
@@ -919,6 +933,7 @@ class TestDatabaseMigration(unittest.TestCase):
         self.db = ShowDatabase(self.tmp.name)
 
     def tearDown(self):
+        self.db.close()
         os.unlink(self.tmp.name)
 
     def test_tables_created(self):

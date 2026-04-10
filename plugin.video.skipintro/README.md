@@ -163,20 +163,9 @@ The addon uses multiple methods to detect and skip intros:
    - Will fetch intro/outro times from online database
    - Requires API key (not yet implemented)
 
-## Repository Setup
+## Updating
 
-To enable automatic updates:
-
-1. **Add Repository:**
-
-   - In Kodi > Add-ons > Package icon
-   - Select "Install from zip file"
-   - Navigate to `repository.plugin.video.skipintro.zip`
-   - Wait for installation
-
-2. **Updates:**
-   - Kodi will automatically check for updates
-   - Install updates through Kodi's addon manager
+To update the addon, download the latest `plugin.video.skipintro-<version>.zip` from the releases page and install it via Kodi's "Install from zip file" option.
 
 ## Development
 

@@ -60,9 +60,14 @@ class ShowDatabase:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit - close persistent connection if exists."""
+        self.close()
+        return False
+
+    def close(self):
+        """Close persistent connection if exists."""
         if self._persistent_conn:
             self._persistent_conn.close()
-        return False
+            self._persistent_conn = None
 
     def _migrate_database(self):
         """Migrate database to current schema"""
