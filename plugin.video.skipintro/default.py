@@ -70,6 +70,24 @@ class SkipIntroPlayer(xbmc.Player):
         xbmc.log('SkipIntro: Playback started', xbmc.LOGINFO)
         self.cleanup()  # Reset state for new playback
         
+    def _wait_for_video_info(self, timeout_ms=5000, interval_ms=500):
+        """Poll until Kodi video info labels are available or timeout."""
+        elapsed = 0
+        while elapsed < timeout_ms:
+            if not self.isPlaying():
+                return False
+            title = xbmc.getInfoLabel('VideoPlayer.TVShowTitle')
+            filename = None
+            try:
+                filename = self.getPlayingFile()
+            except Exception:
+                pass
+            if title or filename:
+                return True
+            xbmc.sleep(interval_ms)
+            elapsed += interval_ms
+        return self.isPlaying()
+
     def onAVStarted(self):
         """Called when Kodi has prepared audio/video for the file"""
         xbmc.log('SkipIntro: AV started', xbmc.LOGINFO)
@@ -80,16 +98,15 @@ class SkipIntroPlayer(xbmc.Player):
         self.timer_active = False
         self.next_check_time = 0
         self.show_from_start = False
-        
-        # Wait longer for video info and chapters to be available
-        xbmc.sleep(5000)  # Initial 5 second wait
-        if not self.isPlaying():
+
+        # Wait for video info to become available (up to 5s, polls every 500ms)
+        if not self._wait_for_video_info():
             return
-            
+
         self.detect_show()
-        
-        # Additional wait for chapters with player state validation
-        xbmc.sleep(3000)  # 3 more seconds
+
+        # Brief pause for chapter metadata to load
+        xbmc.sleep(1000)
         if not self.isPlaying():
             return
             
@@ -399,8 +416,20 @@ class SkipIntroPlayer(xbmc.Player):
         def time_to_seconds(time_str):
             if not time_str:
                 return None
-            minutes, seconds = map(int, time_str.split(':'))
-            return minutes * 60 + seconds
+            try:
+                parts = time_str.split(':')
+                if len(parts) == 2:
+                    minutes, seconds = int(parts[0]), int(parts[1])
+                elif len(parts) == 3:
+                    hours, minutes, seconds = int(parts[0]), int(parts[1]), int(parts[2])
+                    minutes += hours * 60
+                else:
+                    return None
+                if seconds < 0 or seconds >= 60 or minutes < 0:
+                    return None
+                return minutes * 60 + seconds
+            except (ValueError, IndexError):
+                return None
 
         intro_start_seconds = time_to_seconds(intro_start)
         intro_end_seconds = time_to_seconds(intro_end)

@@ -187,25 +187,29 @@ To enable automatic updates:
 
 ### Testing
 
-The addon includes comprehensive unit tests:
+The addon includes unit tests (mocks Kodi modules, no Kodi install needed):
 
 ```bash
+cd plugin.video.skipintro
 python3 test_video_metadata.py -v
+```
+
+Or run on the ARM64 test container:
+
+```bash
+docker run --rm -v $(pwd):/addon kodi-skipintro-test:arm64 test
 ```
 
 ### Building
 
-Use the included build script:
+The build script lives in the sibling `repository.skipintro/` directory:
 
 ```bash
+cd ../repository.skipintro
 ./build.sh
 ```
 
-This will:
-
-- Create addon zip file
-- Generate repository files
-- Update version information
+This will create the addon zip and update repository files.
 
 ### Project Structure
 

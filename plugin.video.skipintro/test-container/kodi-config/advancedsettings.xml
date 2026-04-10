@@ -1,0 +1,10 @@
+<advancedsettings>
+  <services>
+    <webserver>true</webserver>
+    <webserverport>8080</webserverport>
+    <webserverusername>kodi</webserverusername>
+    <webserverpassword>kodi</webserverpassword>
+    <esallinterfaces>true</esallinterfaces>
+    <zeroconf>false</zeroconf>
+  </services>
+</advancedsettings>

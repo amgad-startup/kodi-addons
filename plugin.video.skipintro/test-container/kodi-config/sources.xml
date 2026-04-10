@@ -1,0 +1,15 @@
+<sources>
+  <video>
+    <default pathversion="1"></default>
+    <source>
+      <name>TV Shows (sweetnas)</name>
+      <path pathversion="1">smb://amgad:efta7YaNas66%5E@192.168.1.21/sweetnas/skipintro_addon/tv-shows-test/</path>
+      <allowsharing>true</allowsharing>
+    </source>
+    <source>
+      <name>Local Media</name>
+      <path pathversion="1">/media/</path>
+      <allowsharing>true</allowsharing>
+    </source>
+  </video>
+</sources>

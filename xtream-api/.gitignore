@@ -27,3 +27,4 @@ xtream-api.code-workspace
 failed_streams.json
 config.json
 .vscode/launch.json
+.logs/

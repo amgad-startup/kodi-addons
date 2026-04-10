@@ -1,0 +1,15 @@
+# Credentials
+**/passwords.xml
+**/*.credentials
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

@@ -1,45 +1,42 @@
-# Skip Intro Addon
+# Skip Intro Repository
 
-The Skip Intro Addon for Kodi allows users to automatically skip intros by detecting bookmarks, subtitles, or using a fixed delay.
+Kodi repository for the Skip Intro Addon — automatic updates via Kodi's addon manager.
 
-## Features
+## What this repo contains
 
-- Automatically detects and skips intros in videos.
-- Configurable delay for skipping intros.
-- Supports multiple detection methods including bookmarks and subtitles.
+- `build.sh` / `build.py` — Build scripts to package the addon and generate repository XML
+- `repo/` — Generated repository structure served to Kodi
+- `release/` — Release artifacts
+
+## The Addon
+
+The Skip Intro Addon (`plugin.video.skipintro`) detects, remembers, and skips TV show intros/outros. Source code is in the sibling `plugin.video.skipintro/` directory.
+
+**Detection methods (in priority order):**
+1. Saved times from SQLite database (per-show or per-episode)
+2. Chapter markers via ffmpeg (`-f ffmetadata`)
+3. Configurable default delay (fallback)
+
+**Features:**
+- Context menu "Set Skip Intro Times" for manual time or chapter input
+- Skip button overlay during playback
+- Show-level and episode-level configuration
+- Supports both time-based and chapter-based skip points
 
 ## Installation
 
-1. **Download the Addon:**
+1. Download the repository zip from [Releases](https://github.com/amgadabdelhafez/plugin.video.skipintro/releases)
+2. In Kodi: Add-ons → Package icon → Install from zip file
+3. Select the repository zip — Kodi will check for addon updates automatically
 
-   - Go to the [Releases](https://github.com/amgadabdelhafez/plugin.video.skipintro/releases) section of the GitHub repository.
-   - Download the latest release zip file of the addon.
+## Building
 
-2. **Install the Addon in Kodi:**
+```bash
+./build.sh
+```
 
-   - Open Kodi and go to the "Add-ons" section.
-   - Click on the "Package" icon in the top-left corner.
-   - Select "Install from zip file."
-   - Navigate to the location where you downloaded the zip file and select it.
-   - Kodi will install the addon from the zip file.
-
-3. **Enable the Addon:**
-   - After installation, go to "My add-ons" in Kodi.
-   - Find the Skip Intro Addon in the list and ensure it is enabled.
-
-## Repository Setup
-
-To enable automatic updates, add the repository to Kodi:
-
-1. **Add the Repository:**
-   - In Kodi, go to "Add-ons" and click on the "Package" icon.
-   - Select "Install from zip file" and navigate to the location where you have the `repository.plugin.video.skipintro.xml` file.
-   - Once added, Kodi will use this repository to check for updates to your addon.
-
-## Contributing
-
-Contributions are welcome! Please fork the repository and submit a pull request for any improvements or bug fixes.
+This packages the addon from `../plugin.video.skipintro/`, generates the repository XML, and places artifacts in `repo/`.
 
 ## License
 
-This project is licensed under the MIT License.
+MIT License
