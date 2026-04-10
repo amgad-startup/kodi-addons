@@ -271,7 +271,7 @@ class SkipIntroPlayer(xbmc.Player):
                     # Store chapter numbers and use show_from_start so button shows immediately
                     self._skip_to_chapter = intro_end_chapter
                     self.intro_start = 0
-                    self.intro_bookmark = 1  # Sentinel — skip uses chapter seek, not time seek
+                    self.intro_bookmark = 99999  # Large sentinel — button stays visible until clicked
                     self.intro_duration = None
                     xbmc.log(f'SkipIntro: Using chapter-seek mode, will seek to chapter {intro_end_chapter}', xbmc.LOGINFO)
 
