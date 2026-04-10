@@ -340,14 +340,17 @@ class SkipIntroPlayer(xbmc.Player):
             xbmc.log(f'SkipIntro: Checking default skip - current time: {current_time}, delay: {default_delay}', xbmc.LOGINFO)
             
             if current_time >= default_delay:
+                self.intro_start = current_time
                 self.intro_bookmark = current_time + skip_duration
                 xbmc.log(f'SkipIntro: Using default skip - will skip to: {self.intro_bookmark}', xbmc.LOGINFO)
                 self.show_skip_button()
             else:
-                # Set up timer for default skip
+                # Pre-set intro times so they're ready when the timer fires
+                self.intro_start = default_delay
+                self.intro_bookmark = default_delay + skip_duration
                 self.next_check_time = default_delay
                 self.timer_active = True
-                xbmc.log(f'SkipIntro: Set timer for default skip at {default_delay}', xbmc.LOGINFO)
+                xbmc.log(f'SkipIntro: Set timer for default skip at {default_delay}, will skip to {self.intro_bookmark}', xbmc.LOGINFO)
         except Exception as e:
             xbmc.log('SkipIntro: Error in default skip check: {}'.format(str(e)), xbmc.LOGERROR)
 
