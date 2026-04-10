@@ -2,6 +2,24 @@
     <section id="plugin.video.skipintro">
         <category id="general" label="32000">
             <group id="1">
+                <setting id="enable_autoskip" type="boolean" label="Auto-skip intro" help="Automatically skip intros without showing the button">
+                    <level>0</level>
+                    <default>false</default>
+                    <control type="toggle" />
+                </setting>
+                <setting id="delay_autoskip" type="integer" label="Auto-skip delay (seconds)" help="Seconds to wait before auto-skipping (0 = immediate)">
+                    <level>0</level>
+                    <default>0</default>
+                    <constraints>
+                        <minimum>0</minimum>
+                        <step>1</step>
+                        <maximum>10</maximum>
+                    </constraints>
+                    <dependencies>
+                        <dependency type="enable" setting="enable_autoskip">true</dependency>
+                    </dependencies>
+                    <control type="slider" format="integer" />
+                </setting>
                 <setting id="default_delay" type="integer" label="32001" help="32002">
                     <level>0</level>
                     <default>30</default>

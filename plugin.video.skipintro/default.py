@@ -157,25 +157,42 @@ class SkipIntroPlayer(xbmc.Player):
                 self.timer_active = False  # Disable timer after showing button
 
     def show_skip_button(self):
-        """Show skip intro button and handle timing"""
+        """Show skip intro button or autoskip if enabled"""
         if not self.prompt_shown and self.intro_bookmark is not None:
             current_time = self.getTime()
             show_button = False
-            
+
             if self.show_from_start:
-                # For chapter-only mode, show button until end chapter
                 show_button = current_time < self.intro_bookmark
             elif self.intro_start is not None:
-                # For normal mode, show button during intro period
                 show_button = current_time >= self.intro_start and current_time < self.intro_bookmark
-            
+
             if show_button:
-                xbmc.log(f'SkipIntro: Showing skip button at {current_time}', xbmc.LOGINFO)
-                if self.ui.prompt_skip_intro(lambda: self.skip_to_intro_end()):
+                # Check autoskip setting
+                try:
+                    autoskip = self.settings_manager.addon.getSettingBool('enable_autoskip')
+                except Exception:
+                    autoskip = False
+
+                if autoskip:
+                    delay = 0
+                    try:
+                        delay = int(self.settings_manager.addon.getSetting('delay_autoskip') or '0')
+                    except (ValueError, TypeError):
+                        pass
+                    if delay > 0:
+                        xbmc.log(f'SkipIntro: Autoskip in {delay}s', xbmc.LOGINFO)
+                        xbmc.sleep(delay * 1000)
+                    xbmc.log(f'SkipIntro: Autoskipping at {current_time}', xbmc.LOGINFO)
+                    self.skip_to_intro_end()
                     self.prompt_shown = True
-                    xbmc.log('SkipIntro: Skip button shown successfully', xbmc.LOGINFO)
                 else:
-                    xbmc.log('SkipIntro: Failed to show skip button', xbmc.LOGWARNING)
+                    xbmc.log(f'SkipIntro: Showing skip button at {current_time}', xbmc.LOGINFO)
+                    if self.ui.prompt_skip_intro(lambda: self.skip_to_intro_end()):
+                        self.prompt_shown = True
+                        xbmc.log('SkipIntro: Skip button shown successfully', xbmc.LOGINFO)
+                    else:
+                        xbmc.log('SkipIntro: Failed to show skip button', xbmc.LOGWARNING)
             else:
                 xbmc.log(f'SkipIntro: Not showing skip button. Current time: {current_time}, Intro start: {self.intro_start}, Intro end: {self.intro_bookmark}', xbmc.LOGINFO)
 
