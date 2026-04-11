@@ -1,5 +1,6 @@
 FROM ubuntu:22.04
 
+ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \

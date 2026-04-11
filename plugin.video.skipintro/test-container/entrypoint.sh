@@ -13,6 +13,10 @@ if [ -d "$ADDON_SRC" ]; then
     cp -r "$ADDON_SRC"/default.py "$ADDON_DST"/
     cp -r "$ADDON_SRC"/context.py "$ADDON_DST"/
     cp -r "$ADDON_SRC"/resources "$ADDON_DST"/
+    # Copy optional files if they exist
+    for f in database_tools.py browse_path.py; do
+        [ -f "$ADDON_SRC/$f" ] && cp "$ADDON_SRC/$f" "$ADDON_DST"/
+    done
     echo "==> Addon files synced"
 else
     echo "ERROR: No addon mounted at $ADDON_SRC"
@@ -38,7 +42,7 @@ echo "    ffmpeg: $(ffmpeg -version 2>&1 | head -1)"
 echo "    Kodi data: ${KODI_DATA}"
 echo ""
 
-# If first arg is "test", run unit tests instead of Kodi
+# If first arg is "test", run unit tests
 if [ "${1}" = "test" ]; then
     echo "==> Running addon tests"
     cd "$ADDON_SRC"
@@ -57,9 +61,16 @@ rm -f /tmp/.X99-lock
 Xvfb :99 -screen 0 1280x720x24 &
 sleep 1
 
-echo "==> Starting Kodi"
+# Find the Kodi binary — path varies by architecture
+KODI_BIN=$(find /usr/lib -name "kodi.bin" -type f 2>/dev/null | head -1)
+if [ -z "$KODI_BIN" ]; then
+    echo "ERROR: kodi.bin not found"
+    exit 1
+fi
+
+echo "==> Starting Kodi ($KODI_BIN)"
 echo "    Web interface: http://localhost:8080 (kodi/kodi)"
 echo "    JSON-RPC:      http://localhost:9090"
 echo ""
 
-exec /usr/lib/aarch64-linux-gnu/kodi/kodi.bin --standalone --debug
+exec "$KODI_BIN" --standalone --debug
