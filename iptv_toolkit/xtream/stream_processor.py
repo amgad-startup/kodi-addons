@@ -209,6 +209,23 @@ class StreamProcessor:
             progress.update(1)
         
         progress.close()
-        
+
+        # Write accumulated M3U content to output_file. Previously this loop
+        # discarded batch_content at function scope — the m3u file was never
+        # actually created. Now we write atomically after processing.
+        if batch_content and output_file:
+            os.makedirs(os.path.dirname(output_file) or '.', exist_ok=True)
+            mode = 'w' if self.fresh_run else 'a'
+            needs_header = (
+                self.fresh_run
+                or not os.path.exists(output_file)
+                or os.path.getsize(output_file) == 0
+            )
+            with open(output_file, mode, encoding='utf-8') as f:
+                if needs_header:
+                    f.write("#EXTM3U\n")
+                f.write("\n".join(batch_content) + "\n")
+            logger.info(f"Wrote {len(batch_content)//2} entries to {output_file}")
+
         # Save catalog
         self.catalog_manager.save_catalog(stream_type, streams, [])

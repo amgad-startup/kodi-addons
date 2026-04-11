@@ -35,7 +35,7 @@ class SeriesProcessor(BaseProcessor):
         self.episodes_processed = 0
         self.strm_processor = STRMProcessor(max_episodes=max_episodes)
 
-    def _process_stream(self, stream, batch_content):
+    def _process_stream(self, stream, batch_content, output_folder=None):
         self.episodes_processed = 0
 
         series_id = stream.get("series_id")

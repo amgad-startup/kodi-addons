@@ -15,7 +15,7 @@ class LiveProcessor(BaseProcessor):
             self.db_manager = KodiDBManager()
         self.strm_processor = STRMProcessor()
 
-    def _process_stream(self, stream, batch_content):
+    def _process_stream(self, stream, batch_content, output_folder=None):
         """Process a live stream and add to batch content."""
         stream_id = stream.get("stream_id")
         name = stream.get("name", "")
@@ -44,7 +44,12 @@ class LiveProcessor(BaseProcessor):
                     'name': clean_name,
                     'category_name': category
                 }
-                self.strm_processor.process_stream(stream_data, 'live_streams', self.api)
+                self.strm_processor.process_stream(
+                    movie_dir=None,
+                    stream_data=stream_data,
+                    stream_type='live_streams',
+                    api_client=self.api,
+                )
             
             # Add to M3U playlist
             metadata_parts = [

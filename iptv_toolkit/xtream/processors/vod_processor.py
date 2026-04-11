@@ -6,8 +6,11 @@ shared ``STRMProcessor`` + ``iptv_toolkit.media.nfo`` rather than go through the
 ``--mode kodi`` is not implemented on this path; use ``--mode local``.
 """
 
+import os
+
 from iptv_toolkit.xtream.processors.base_processor import BaseProcessor
 from iptv_toolkit.xtream.strm_processor import STRMProcessor
+from iptv_toolkit.core.config import OUTPUT_DIRS
 from iptv_toolkit.core.utils import (
     should_skip_title,
     reorder_mixed_language,
@@ -29,7 +32,7 @@ class VODProcessor(BaseProcessor):
         self.title_cleaner = VODTitleCleaner()
         self.strm_processor = STRMProcessor()
 
-    def _process_stream(self, stream, batch_content):
+    def _process_stream(self, stream, batch_content, output_folder=None):
         stream_id = stream.get("stream_id")
         raw_name = stream.get("name", "")
         category = sanitize_category_name(stream.get("category_name", ""))
@@ -50,8 +53,9 @@ class VODProcessor(BaseProcessor):
             'category_name': category,
             'category_id': stream.get('category_id', ''),
         }
+        movie_dir = os.path.join(OUTPUT_DIRS.get('vod', 'vod-flat'), clean_name)
         self.strm_processor.process_stream(
-            movie_dir=f"vod-flat/{clean_name}",
+            movie_dir=movie_dir,
             stream_data=stream_data,
             stream_type='vod',
             api_client=self.api,

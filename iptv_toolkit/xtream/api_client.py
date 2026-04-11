@@ -28,6 +28,17 @@ class XtreamCodesAPI:
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
+
+        # Many Xtream panels reject requests without a browser-like UA
+        # (especially after recent abuse). Mimic a stock Chrome.
+        self.session.headers.update({
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/120.0.0.0 Safari/537.36'
+            ),
+            'Accept': 'application/json, text/plain, */*',
+        })
         
         # Cache for categories
         self.categories = {

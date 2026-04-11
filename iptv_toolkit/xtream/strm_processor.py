@@ -2,17 +2,32 @@
 
 import os
 from iptv_toolkit.core.utils import (
-    reorder_mixed_language, 
+    reorder_mixed_language,
     sanitize_filename,
     sanitize_category_name,
     format_season_number,
     format_episode_number
 )
+from iptv_toolkit.core.config import OUTPUT_DIRS
 from iptv_toolkit.media.nfo import (
     generate_movie_nfo,
     generate_tvshow_nfo,
     generate_episode_nfo
 )
+
+
+def _base_path_for(stream_type):
+    """Return the absolute base path for a stream type from config.OUTPUT_DIRS.
+
+    Falls back to the historical relative names if OUTPUT_DIRS isn't populated
+    (e.g. missing config.json). Keeps the module runnable out-of-the-box.
+    """
+    mapping = {
+        'series': OUTPUT_DIRS.get('series', 'series-flat'),
+        'vod': OUTPUT_DIRS.get('vod', 'vod-flat'),
+        'live_streams': OUTPUT_DIRS.get('live_streams', 'live'),
+    }
+    return mapping.get(stream_type, 'output')
 
 class STRMProcessor:
     def __init__(self, max_episodes=None):
@@ -42,13 +57,9 @@ class STRMProcessor:
         if stream_type in ['vod', 'series']:
             name = reorder_mixed_language(name)
         
-        # Create base paths
-        if stream_type == "series":
-            base_path = "series-flat"
-        elif stream_type == "vod":
-            base_path = "vod-flat"
-        else:  # live_streams
-            base_path = "live"
+        # Resolve base path from config.OUTPUT_DIRS (absolute),
+        # so files land under CONFIG['directories']['base_path'] rather than cwd.
+        base_path = _base_path_for(stream_type)
         
         if stream_type == "series":
             self._process_series_stream(stream_data, api_client, base_path, category, tags)
