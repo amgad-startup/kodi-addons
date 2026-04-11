@@ -1,0 +1,50 @@
+{
+  "api": {
+    "url": null,
+    "username": null,
+    "password": null,
+    "timeout": 30,
+    "retry": {
+      "total": 3,
+      "backoff_factor": 0.5,
+      "status_forcelist": [500, 502, 503, 504]
+    }
+  },
+  "directories": {
+    "base_path": "~/Media",
+    "folder_name": "xtream",
+    "subdirs": {
+      "live_streams": "live",
+      "vod": "movies",
+      "series": "series",
+      "radio": "radio"
+    }
+  },
+  "processing": {
+    "delays": {
+      "series_processing": 0.1,
+      "series_batch": 1.0,
+      "api_calls": 0.2
+    }
+  },
+  "cache": {
+    "enabled": true,
+    "ttl_seconds": 86400
+  },
+  "filtering": {
+    "category": {
+      "excluded_keywords": [],
+      "language_rules": {
+        "allow_arabic_only": true,
+        "allow_english_only": true,
+        "allow_mixed": true,
+        "arabic_regex": "[\\u0600-\\u06FF]",
+        "english_regex": "[A-Za-z]"
+      }
+    }
+  },
+  "logging": {
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "date_format": "%Y-%m-%d %H:%M:%S"
+  }
+}

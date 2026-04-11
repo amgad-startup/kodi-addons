@@ -18,3 +18,4 @@ __pycache__/
 **/reload.py
 **/clear_configs.py
 **/player.html
+config.json

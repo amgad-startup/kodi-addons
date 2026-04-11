@@ -6,14 +6,8 @@ from tqdm import tqdm
 import random
 from pathlib import Path
 from iptv_toolkit.core.config import OUTPUT_DIRS, STREAM_TYPES, CONFIG
-try:
-    from iptv_toolkit.xtream.processors.vod_processor import VODProcessor
-except ImportError:
-    VODProcessor = None  # type: ignore
-try:
-    from iptv_toolkit.xtream.processors.series_processor import SeriesProcessor
-except ImportError:
-    SeriesProcessor = None  # type: ignore
+from iptv_toolkit.xtream.processors.vod_processor import VODProcessor
+from iptv_toolkit.xtream.processors.series_processor import SeriesProcessor
 from iptv_toolkit.xtream.processors.live_processor import LiveProcessor
 from iptv_toolkit.xtream.catalog_manager import CatalogManager
 from iptv_toolkit.xtream.failed_streams import FailedStreamsTracker

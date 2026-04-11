@@ -45,24 +45,73 @@ class XtreamCodesAPI:
 
     @cache_response('auth')
     def authenticate(self):
-        """Authenticate and retrieve general account information."""
+        """Authenticate and retrieve general account information.
+
+        Returns ``None`` and prints a diagnostic on failure. Different panels
+        signal bad credentials differently — some return 200 with
+        ``{"user_info": {"auth": 0}}``, others return 404, others return an
+        HTML "Access Denied" page. We try to distinguish these cases so the
+        user knows whether to renew, change URL, or check network.
+        """
         print("\nAttempting authentication...")
         auth_url = f"{self.base_url}/player_api.php"
-        params = {
-            "username": self.username,
-            "password": self.password
-        }
-        
+        params = {"username": self.username, "password": self.password}
+
         try:
             response = self.session.get(auth_url, params=params, timeout=self.timeout)
-            if response.status_code == 200:
-                data = response.json()
-                print("Authentication successful")
-                return data
+        except requests.exceptions.SSLError as e:
+            print(f"Authentication error: TLS handshake failed — try http:// instead of https://, "
+                  f"or check the panel's real port. ({e})")
+            return None
+        except requests.exceptions.ConnectTimeout:
+            print(f"Authentication error: connection to {self.base_url} timed out after "
+                  f"{self.timeout}s. Panel may be down or port is blocked.")
+            return None
+        except requests.exceptions.ConnectionError as e:
+            print(f"Authentication error: cannot reach {self.base_url}. "
+                  f"Check the URL and network. ({e})")
             return None
         except Exception as e:
-            print(f"Authentication error: {str(e)}")
+            print(f"Authentication error: unexpected failure — {type(e).__name__}: {e}")
             return None
+
+        if response.status_code == 200:
+            try:
+                data = response.json()
+            except ValueError:
+                print(f"Authentication error: panel returned 200 but non-JSON body "
+                      f"(first 120 chars): {response.text[:120]!r}. "
+                      f"URL is probably not an Xtream panel endpoint.")
+                return None
+            user_info = (data or {}).get('user_info', {}) if isinstance(data, dict) else {}
+            if user_info.get('auth') == 0:
+                print(f"Authentication error: panel rejected credentials (auth=0). "
+                      f"Username/password wrong.")
+                return None
+            status = user_info.get('status')
+            if status and status.lower() not in ('active', 'trial'):
+                exp = user_info.get('exp_date', 'unknown')
+                print(f"Authentication error: subscription status is {status!r} "
+                      f"(expires: {exp}). Renew with your provider.")
+                return None
+            print("Authentication successful")
+            return data
+
+        if response.status_code == 404:
+            print(f"Authentication error: panel returned 404 for player_api.php with "
+                  f"credentials. On many panels this means the subscription is expired "
+                  f"or the credentials are invalid. Check with your provider.")
+            return None
+        if response.status_code in (401, 403):
+            print(f"Authentication error: HTTP {response.status_code} — credentials "
+                  f"rejected or IP blocked.")
+            return None
+        if 500 <= response.status_code < 600:
+            print(f"Authentication error: panel returned HTTP {response.status_code}. "
+                  f"Server error on their side; try again later.")
+            return None
+        print(f"Authentication error: unexpected HTTP {response.status_code}.")
+        return None
 
     @cache_response('categories')
     def get_categories(self, stream_type):

@@ -47,9 +47,9 @@ def setup_logger(name, debug=False):
         console_handler.setLevel(logging.DEBUG if debug else logging.INFO)
         logger.addHandler(console_handler)
         
-        # Create file handler in program directory
-        program_dir = os.path.dirname(os.path.abspath(__file__))
-        log_dir = os.path.join(program_dir, '.logs')
+        # Create file handler in the user's cwd (not the package directory).
+        # Honors IPTV_TOOLKIT_LOG_DIR if set, otherwise defaults to ./logs/.
+        log_dir = os.environ.get('IPTV_TOOLKIT_LOG_DIR', os.path.join(os.getcwd(), 'logs'))
         os.makedirs(log_dir, exist_ok=True)
         
         log_file = os.path.join(log_dir, f"{datetime.now().strftime('%Y-%m-%d')}.log")

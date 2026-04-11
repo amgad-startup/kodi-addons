@@ -53,9 +53,9 @@ iptv_toolkit/
     ├── file_operations.py
     └── processors/
         ├── base_processor.py
-        ├── live_processor.py       # working
-        ├── vod_processor.py        # broken: see Known Issues
-        └── series_processor.py     # broken: see Known Issues
+        ├── live_processor.py       # working (all modes)
+        ├── vod_processor.py        # working (--mode local); kodi mode NotImplementedError
+        └── series_processor.py     # working (--mode local); kodi mode NotImplementedError
 ```
 
 ## Configuration
@@ -82,14 +82,15 @@ Xtream runtime options (output paths, batch delays, stream types) live in `confi
 pip install -r iptv_toolkit/requirements.txt
 ```
 
-## Known issues (pre-existing)
+## Known limitations
 
-`xtream/processors/vod_processor.py` and `series_processor.py` import
-`processors.vod.*` / `processors.series.*` submodules (`metadata_extractor`,
-`cast_cleaner`, `file_generator`) that were **never committed to any of the
-source repos**. These are stubbed with tolerant `try/except ImportError` so the
-package imports cleanly and `LiveProcessor` works, but VOD and Series processing
-will raise at runtime until the missing modules are written.
-
-This is not caused by the merge — it exists on `main` in the old `xtream-api/`
-directory. Tracking as its own follow-up.
+- **Xtream `--mode kodi` on VOD/Series:** not implemented. The original
+  `xtream-api` project depended on unfinished `processors.{vod,series}.*`
+  helper modules that were never committed. As part of the merge, `_process_stream`
+  was rewritten to delegate to the shared `STRMProcessor` + `iptv_toolkit.media.nfo`,
+  which covers `--mode local` (STRM + NFO generation) fully. Kodi DB insertion
+  for VOD/Series would require wiring the result shapes into `KodiDBManager`;
+  it currently raises `NotImplementedError` with a clear message.
+- **Live TV `--mode kodi`:** no-op (LiveProcessor has a placeholder for PVR
+  integration). Use `--mode local` for live streams, or point Kodi's PVR IPTV
+  Simple Client at the generated `live.m3u`.
