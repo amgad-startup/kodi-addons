@@ -1,7 +1,0 @@
-requests>=2.31.0
-urllib3>=2.0.3
-python-dotenv>=1.0.0
-psutil>=5.9.0
-tqdm>=4.65.0
-SQLAlchemy
-arabic-buckwalter-transliteration
