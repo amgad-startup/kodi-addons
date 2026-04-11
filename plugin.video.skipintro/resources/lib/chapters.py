@@ -73,7 +73,7 @@ class ChapterManager:
 
     def _is_mkv(self, filepath: str) -> bool:
         """Check if a file is an MKV by extension."""
-        return filepath.lower().rstrip('/').endswith(('.mkv', '.webm'))
+        return filepath.lower().rstrip('/\\').endswith(('.mkv', '.webm'))
 
     # Limits for enzyme parsing safety
     MAX_CHAPTERS = 100

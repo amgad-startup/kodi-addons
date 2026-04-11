@@ -8,6 +8,15 @@ def sanitize_path(path):
     """Remove credentials from any scheme://user:pass@host URL for safe logging."""
     return re.sub(r'(://)[^:]+:[^@]+@', r'\1***:***@', str(path))
 
+
+def safe_basename(path):
+    """Get filename from a path, handling both native and network (smb://) paths.
+
+    os.path.basename fails on Windows for network URLs because it splits
+    on backslash only. This splits on both / and \\ for cross-platform safety.
+    """
+    return str(path).rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+
 class ShowMetadata:
     def __init__(self):
         self.show_regex = re.compile(r'^(.*?)(?:s(\d{1,2})e(\d{1,2})|(\d{1,2})x(\d{1,2}))', re.IGNORECASE)
@@ -58,9 +67,9 @@ class ShowMetadata:
     def _parse_filename(self, filename):
         """Parse show information from filename"""
         try:
-            # Get just the filename without path
-            filename = xbmcvfs.translatePath(filename)
-            basename = filename.split('/')[-1].split('\\')[-1]
+            # Get just the filename without path — handle both native and network paths
+            # Network paths (smb://...) won't translate properly, so split on both separators
+            basename = filename.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
             xbmc.log(f'SkipIntro: Parsing basename: {basename}', xbmc.LOGINFO)
             
             # Try to match show pattern

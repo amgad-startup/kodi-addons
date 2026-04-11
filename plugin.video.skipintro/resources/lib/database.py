@@ -23,9 +23,9 @@ class ShowDatabase:
             else:
                 # Ensure directory exists for file databases
                 db_dir = os.path.dirname(db_path)
-                if db_dir and not os.path.exists(db_dir):
-                    os.makedirs(db_dir)
-                    xbmc.log(f'SkipIntro: Created database directory: {db_dir}', xbmc.LOGINFO)
+                if db_dir and not xbmcvfs.exists(db_dir):
+                    xbmcvfs.mkdirs(db_dir)
+                    xbmc.log(f'SkipIntro: Created database directory', xbmc.LOGINFO)
 
             # Always create tables and migrate database
             self._create_tables()

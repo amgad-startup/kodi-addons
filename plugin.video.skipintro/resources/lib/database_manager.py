@@ -303,6 +303,9 @@ class DatabaseManager:
                     dialog.notification('Skip Intro', 'Import file too large (max 10MB)', xbmcgui.NOTIFICATION_ERROR)
                     return False
                 json_content = vfs_file.read()
+                # xbmcvfs.File.read() may return bytes on some Kodi versions
+                if isinstance(json_content, bytes):
+                    json_content = json_content.decode('utf-8')
                 json_data = json.loads(json_content)
             finally:
                 vfs_file.close()

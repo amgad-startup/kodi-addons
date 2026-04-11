@@ -54,7 +54,8 @@ def get_selected_item_info():
                 xbmc.log('SkipIntro: Could not parse show info from filename', xbmc.LOGWARNING)
                 # Still allow configuration with just filename if parsing fails
                 # Use filename as show title
-                filename = os.path.basename(filepath)
+                from resources.lib.metadata import safe_basename
+                filename = safe_basename(filepath)
                 item = {
                     'showtitle': os.path.splitext(filename)[0],  # Use filename without extension as title
                     'season': 1,  # Default to season 1
@@ -332,9 +333,9 @@ def save_user_times():
 
     # Ensure database directory exists
     db_dir = os.path.dirname(translated_path)
-    if not os.path.exists(db_dir):
-        os.makedirs(db_dir)
-        xbmc.log(f'SkipIntro: Created database directory: {db_dir}', xbmc.LOGINFO)
+    if not xbmcvfs.exists(db_dir):
+        xbmcvfs.mkdirs(db_dir)
+        xbmc.log(f'SkipIntro: Created database directory', xbmc.LOGINFO)
 
     try:
         db = ShowDatabase(translated_path)

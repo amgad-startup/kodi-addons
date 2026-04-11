@@ -27,8 +27,8 @@ def get_database():
         # Ensure directory exists
         translated_path = xbmcvfs.translatePath(db_path)
         db_dir = os.path.dirname(translated_path)
-        if not os.path.exists(db_dir):
-            os.makedirs(db_dir)
+        if not xbmcvfs.exists(db_dir):
+            xbmcvfs.mkdirs(db_dir)
 
         return ShowDatabase(translated_path)
     except Exception as e:
@@ -269,7 +269,8 @@ class SkipIntroPlayer(xbmc.Player):
             return
 
         playing_file = self.getPlayingFile()
-        xbmc.log(f'SkipIntro: Detecting show for file: {os.path.basename(playing_file)}', xbmc.LOGINFO)
+        from resources.lib.metadata import safe_basename
+        xbmc.log(f'SkipIntro: Detecting show for file: {safe_basename(playing_file)}', xbmc.LOGINFO)
 
         self.show_info = self.metadata.get_show_info()
         if self.show_info:
