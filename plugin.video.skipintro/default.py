@@ -296,6 +296,23 @@ class SkipIntroPlayer(xbmc.Player):
                 xbmc.log(f'SkipIntro: No show_id found for {self.show_info["title"]}', xbmc.LOGINFO)
                 return
 
+            episode_config = self.db.get_episode_times(
+                show_id,
+                self.show_info.get('season'),
+                self.show_info.get('episode')
+            )
+            if episode_config and (
+                episode_config.get('intro_end_time') is not None or
+                episode_config.get('intro_end_chapter') is not None
+            ):
+                self.has_config = True
+                if episode_config.get('use_chapters'):
+                    self.set_chapter_based_markers(episode_config)
+                else:
+                    self.set_time_based_markers(episode_config, "episode config")
+                xbmc.log(f'SkipIntro: Using episode-specific config: {episode_config}', xbmc.LOGINFO)
+                return
+
             # Get show config
             config = self.db.get_show_config(show_id)
             xbmc.log(f'SkipIntro: Show config: {config}', xbmc.LOGINFO)

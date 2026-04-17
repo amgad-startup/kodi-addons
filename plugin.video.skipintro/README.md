@@ -153,13 +153,21 @@ The addon uses multiple methods to detect and skip intros:
 
    All times are saved in the database and used for future playback of the show.
 
-4. **Default Skip:**
+4. **Audio Auto-Detection:**
+
+   - From the library context menu, choose "Set Skip Intro Times" and then "Auto-detect from episode audio"
+   - The addon extracts the first 10 minutes from up to three nearby episodes using `ffmpeg`
+   - If `inaSpeechSegmenter` is available in Kodi's Python environment, it looks for a long music block followed by silence/dialogue
+   - The detected median show timing is saved as a show default, and the selected episode also gets an episode-specific override
+   - If `ffmpeg` or `inaSpeechSegmenter` is unavailable, the addon leaves existing skip times unchanged
+
+5. **Default Skip:**
 
    - Falls back to configured delay if no other times found
    - Shows skip button after delay time
    - Option to save user-confirmed times
 
-5. **Online API** (Coming Soon):
+6. **Online API** (Coming Soon):
    - Will fetch intro/outro times from online database
    - Requires API key (not yet implemented)
 
@@ -173,6 +181,7 @@ To update the addon, download the latest `plugin.video.skipintro-<version>.zip` 
 
 - Python 3.x
 - Kodi 19 (Matrix) or newer
+- Optional for audio auto-detection: `ffmpeg` and `inaSpeechSegmenter`
 
 ### Testing
 

@@ -311,6 +311,75 @@ class ShowDatabase:
             xbmc.log(f'SkipIntro: Error setting manual show chapters: {str(e)}', xbmc.LOGERROR)
             return False
 
+    def save_episode_times(self, show_id, season, episode, times):
+        """Save episode-specific intro/outro times or chapters."""
+        try:
+            conn = self._get_connection()
+            needs_close = (not self._persistent_conn)
+            try:
+                c = conn.cursor()
+                c.execute('''
+                    INSERT OR REPLACE INTO episodes
+                    (show_id, season, episode, intro_start_chapter, intro_end_chapter,
+                     intro_start_time, intro_end_time, outro_start_time, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    show_id,
+                    season,
+                    episode,
+                    times.get('intro_start_chapter'),
+                    times.get('intro_end_chapter'),
+                    times.get('intro_start_time'),
+                    times.get('intro_end_time'),
+                    times.get('outro_start_time'),
+                    times.get('source')
+                ))
+                conn.commit()
+                xbmc.log(f'SkipIntro: Successfully saved episode times: S{season}E{episode} {times}', xbmc.LOGINFO)
+                return True
+            finally:
+                if needs_close:
+                    conn.close()
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Error saving episode times: {str(e)}', xbmc.LOGERROR)
+            return False
+
+    def get_episode_times(self, show_id, season, episode):
+        """Get episode-specific intro/outro times or chapters."""
+        try:
+            conn = self._get_connection()
+            needs_close = (not self._persistent_conn)
+            try:
+                c = conn.cursor()
+                c.execute('''
+                    SELECT intro_start_chapter, intro_end_chapter,
+                           intro_start_time, intro_end_time, outro_start_time, source
+                    FROM episodes
+                    WHERE show_id = ? AND season = ? AND episode = ?
+                ''', (show_id, season, episode))
+                result = c.fetchone()
+
+                if not result:
+                    return None
+
+                config = {
+                    'use_chapters': result[0] is not None or result[1] is not None,
+                    'intro_start_chapter': result[0],
+                    'intro_end_chapter': result[1],
+                    'intro_start_time': result[2],
+                    'intro_end_time': result[3],
+                    'outro_start_time': result[4],
+                    'source': result[5]
+                }
+                xbmc.log(f'SkipIntro: Found episode times: {config}', xbmc.LOGINFO)
+                return config
+            finally:
+                if needs_close:
+                    conn.close()
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Error getting episode times: {str(e)}', xbmc.LOGERROR)
+            return None
+
     def get_show_times(self, show_id):
         """Get intro/outro times or chapters for a show"""
         try:

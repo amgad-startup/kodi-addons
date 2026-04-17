@@ -8,6 +8,7 @@ import os
 from resources.lib.database import ShowDatabase
 from resources.lib.metadata import ShowMetadata
 from resources.lib.chapters import ChapterManager
+from resources.lib.audio_intro import AudioIntroDetectionError, AudioIntroDetector
 
 def get_selected_item_info():
     """Get info about the selected item in Kodi"""
@@ -105,7 +106,7 @@ def get_time_input(dialog, prompt, default='', required=True):
             continue
         return None
 
-def get_manual_times(show_id, db):
+def get_manual_times(show_id, db, item=None):
     """Get times manually from user input or select chapters"""
     try:
         dialog = xbmcgui.Dialog()
@@ -120,7 +121,8 @@ def get_manual_times(show_id, db):
         # Build options list with indicator for previously used method
         options = [
             'Manual time input' + (' [Currently Used]' if is_using_manual else ''),
-            'Chapter selection' + (' [Currently Used]' if is_using_chapters else '')
+            'Chapter selection' + (' [Currently Used]' if is_using_chapters else ''),
+            'Auto-detect from episode audio'
         ]
 
         # Ask user to choose between manual time input or chapter selection
@@ -130,6 +132,8 @@ def get_manual_times(show_id, db):
             return get_manual_time_input(dialog, config)
         elif choice == 1:  # Chapter selection
             return get_chapter_selection(dialog, config)
+        elif choice == 2:  # Audio auto-detection
+            return get_audio_intro_detection(dialog, item)
         else:
             return None
 
@@ -309,6 +313,64 @@ def get_chapter_selection(dialog, config):
             'outro_start_time': None
         }
 
+def format_seconds(seconds):
+    """Format seconds as MM:SS for user-facing prompts."""
+    seconds = int(round(seconds or 0))
+    minutes = seconds // 60
+    secs = seconds % 60
+    return f"{minutes:02d}:{secs:02d}"
+
+def get_audio_intro_detection(dialog, item):
+    """Auto-detect show intro timing from music-to-dialogue audio segments."""
+    if not item or not item.get('file'):
+        dialog.notification('Skip Intro', 'No episode file selected', xbmcgui.NOTIFICATION_ERROR)
+        return None
+
+    try:
+        detector = AudioIntroDetector()
+        candidates = detector.find_episode_candidates(item['file'])
+        dialog.notification(
+            'Skip Intro',
+            f'Analyzing audio from {len(candidates)} episode(s)',
+            xbmcgui.NOTIFICATION_INFO
+        )
+
+        detected = detector.detect_show_intro(candidates)
+        if not detected:
+            dialog.notification('Skip Intro', 'No music-to-dialogue intro found', xbmcgui.NOTIFICATION_WARNING)
+            return None
+
+        intro_start = detected.get('intro_start_time') or 0
+        intro_end = detected.get('intro_end_time')
+        if intro_end is None or intro_end <= intro_start:
+            dialog.notification('Skip Intro', 'Audio detection returned invalid times', xbmcgui.NOTIFICATION_WARNING)
+            return None
+
+        episode_count = detected.get('episode_count', 1)
+        matching_count = detected.get('matching_episode_count', episode_count)
+        message = (
+            f'Detected intro from {format_seconds(intro_start)} to {format_seconds(intro_end)} '
+            f'using {matching_count}/{episode_count} analyzed episode(s). Save this for the show?'
+        )
+        if not dialog.yesno('Skip Intro', message):
+            return None
+
+        return {
+            'intro_start_time': intro_start,
+            'intro_end_time': intro_end,
+            'outro_start_time': None,
+            'source': 'audio_detection'
+        }
+
+    except AudioIntroDetectionError as e:
+        xbmc.log(f'SkipIntro: Audio intro detection unavailable: {str(e)}', xbmc.LOGWARNING)
+        dialog.notification('Skip Intro', str(e), xbmcgui.NOTIFICATION_ERROR)
+        return None
+    except Exception as e:
+        xbmc.log(f'SkipIntro: Audio intro detection error: {str(e)}', xbmc.LOGERROR)
+        dialog.notification('Skip Intro', 'Audio detection failed', xbmcgui.NOTIFICATION_ERROR)
+        return None
+
 def save_user_times():
     """Save user-provided times for show"""
     xbmc.log('SkipIntro: Starting manual time input', xbmc.LOGINFO)
@@ -356,7 +418,7 @@ def save_user_times():
     xbmc.log(f'SkipIntro: Got show ID: {show_id}', xbmc.LOGINFO)
 
     # Get times from user
-    times = get_manual_times(show_id, db)
+    times = get_manual_times(show_id, db, item)
     if times is None:
         xbmc.log('SkipIntro: User cancelled time input', xbmc.LOGINFO)
         return
@@ -385,6 +447,18 @@ def save_user_times():
             )
 
         if success:
+            if times.get('source') == 'audio_detection':
+                db.save_episode_times(
+                    show_id,
+                    item.get('season'),
+                    item.get('episode'),
+                    {
+                        'intro_start_time': times.get('intro_start_time'),
+                        'intro_end_time': times.get('intro_end_time'),
+                        'outro_start_time': times.get('outro_start_time'),
+                        'source': 'audio_detection'
+                    }
+                )
             xbmc.log('SkipIntro: Show times saved successfully', xbmc.LOGINFO)
             xbmcgui.Dialog().notification('Skip Intro', 'Times saved successfully', xbmcgui.NOTIFICATION_INFO)
         else:

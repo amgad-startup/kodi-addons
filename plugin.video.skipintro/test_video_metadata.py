@@ -130,6 +130,18 @@ class MockXBMCVFS:
     def mkdirs(path):
         os.makedirs(path, exist_ok=True)
 
+    @staticmethod
+    def listdir(path):
+        dirs = []
+        files = []
+        for entry in os.listdir(path):
+            full_path = os.path.join(path, entry)
+            if os.path.isdir(full_path):
+                dirs.append(entry)
+            else:
+                files.append(entry)
+        return dirs, files
+
     class File:
         def __init__(self, path, mode='r'):
             pass
@@ -201,6 +213,24 @@ class TestDatabase(unittest.TestCase):
         show_id1 = self.db.get_show('Test Show')
         show_id2 = self.db.get_show('  Test Show  ')
         self.assertEqual(show_id1, show_id2)
+
+    def test_episode_times_save_and_load(self):
+        """Episode-specific times can be saved and loaded"""
+        show_id = self.db.get_show('Test Show')
+        success = self.db.save_episode_times(show_id, 1, 2, {
+            'intro_start_time': 0,
+            'intro_end_time': 263,
+            'outro_start_time': None,
+            'source': 'audio_detection'
+        })
+        self.assertTrue(success)
+
+        config = self.db.get_episode_times(show_id, 1, 2)
+        self.assertIsNotNone(config)
+        self.assertFalse(config['use_chapters'])
+        self.assertEqual(config['intro_start_time'], 0)
+        self.assertEqual(config['intro_end_time'], 263)
+        self.assertEqual(config['source'], 'audio_detection')
 
 class TestMetadata(unittest.TestCase):
     def setUp(self):
@@ -307,6 +337,23 @@ class TestSkipIntro(unittest.TestCase):
             {'intro_start_time': None, 'intro_end_time': None}, "test"))
         self.assertFalse(self.player.set_time_based_markers(
             {'intro_start_time': 30, 'intro_end_time': None}, "test"))
+
+    def test_check_saved_times_prefers_episode_config(self):
+        """Episode-specific config wins over show-level config"""
+        self.player.show_info = {'title': 'Test Show', 'season': 1, 'episode': 2}
+        show_id = self.player.db.get_show('Test Show')
+        self.player.db.set_manual_show_times(show_id, 30, 90)
+        self.player.db.save_episode_times(show_id, 1, 2, {
+            'intro_start_time': 0,
+            'intro_end_time': 263,
+            'source': 'audio_detection'
+        })
+
+        self.player.check_saved_times()
+
+        self.assertEqual(self.player.intro_start, 0)
+        self.assertEqual(self.player.intro_bookmark, 263)
+        self.assertTrue(self.player.has_config)
 
     # --- set_chapter_based_markers ---
 
@@ -747,6 +794,90 @@ class TestChapterManager(unittest.TestCase):
         self.assertEqual(result['intro_end_time'], 90)
 
 
+class TestAudioIntroDetector(unittest.TestCase):
+    """Tests for music-to-dialogue audio intro detection"""
+
+    def test_detect_intro_from_music_silence_speech(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+        detector = AudioIntroDetector(min_music_seconds=120, min_speech_seconds=10)
+        segments = [
+            ('music', 0, 260),
+            ('noEnergy', 260, 263),
+            ('speech', 263, 320),
+        ]
+
+        result = detector.detect_intro_from_segments(segments)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['intro_start_time'], 0)
+        self.assertEqual(result['intro_end_time'], 263)
+
+    def test_detect_intro_requires_long_music(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+        detector = AudioIntroDetector(min_music_seconds=120, min_speech_seconds=10)
+        segments = [
+            ('music', 0, 45),
+            ('speech', 45, 120),
+        ]
+
+        self.assertIsNone(detector.detect_intro_from_segments(segments))
+
+    def test_detect_show_intro_uses_median_across_episodes(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+        detector = AudioIntroDetector(max_episodes=3)
+        detector.analyze_file = MagicMock(side_effect=[
+            {'intro_start_time': 0, 'intro_end_time': 260, 'source': 'audio'},
+            {'intro_start_time': 0, 'intro_end_time': 263, 'source': 'audio'},
+            {'intro_start_time': 0, 'intro_end_time': 301, 'source': 'audio'},
+        ])
+
+        result = detector.detect_show_intro(['e1.mkv', 'e2.mkv', 'e3.mkv'])
+
+        self.assertEqual(result['intro_end_time'], 263)
+        self.assertEqual(result['episode_count'], 3)
+        self.assertEqual(len(result['episode_detections']), 3)
+
+    def test_detect_show_intro_skips_unreadable_episode(self):
+        from resources.lib.audio_intro import AudioIntroDetectionError, AudioIntroDetector
+        detector = AudioIntroDetector(max_episodes=2)
+        detector.analyze_file = MagicMock(side_effect=[
+            AudioIntroDetectionError('bad media'),
+            {'intro_start_time': 0, 'intro_end_time': 263, 'source': 'audio'},
+        ])
+
+        result = detector.detect_show_intro(['bad.mkv', 'good.mkv'])
+
+        self.assertEqual(result['intro_end_time'], 263)
+        self.assertEqual(result['episode_count'], 1)
+
+    def test_find_episode_candidates_uses_neighboring_video_files(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name in ['Show.S01E01.mkv', 'Show.S01E02.mkv', 'Show.S01E03.mkv', 'notes.txt']:
+                open(os.path.join(tmpdir, name), 'w').close()
+
+            selected = os.path.join(tmpdir, 'Show.S01E02.mkv')
+            detector = AudioIntroDetector(max_episodes=2)
+            result = detector.find_episode_candidates(selected)
+
+        self.assertEqual(len(result), 2)
+        self.assertTrue(result[0].endswith('Show.S01E02.mkv'))
+        self.assertTrue(result[1].endswith('Show.S01E03.mkv'))
+
+    def test_find_episode_candidates_accepts_show_folder(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name in ['Show.S01E01.mkv', 'Show.S01E02.mkv']:
+                open(os.path.join(tmpdir, name), 'w').close()
+
+            detector = AudioIntroDetector(max_episodes=2)
+            result = detector.find_episode_candidates(tmpdir + os.sep)
+
+        self.assertEqual(len(result), 2)
+        self.assertTrue(result[0].endswith('Show.S01E01.mkv'))
+        self.assertTrue(result[1].endswith('Show.S01E02.mkv'))
+
+
 class TestMetadataFilenameEdgeCases(unittest.TestCase):
     """Tests for ShowMetadata filename parsing edge cases"""
 
@@ -921,6 +1052,28 @@ class TestContextModule(unittest.TestCase):
         self.assertEqual(result['intro_start_time'], 90)
         self.assertEqual(result['intro_end_time'], 180)
         self.assertIsNone(result['outro_start_time'])
+
+    def test_get_audio_intro_detection_confirms_detected_times(self):
+        import context
+
+        dialog = MagicMock()
+        dialog.yesno.return_value = True
+        fake_detector = MagicMock()
+        fake_detector.find_episode_candidates.return_value = ['e1.mkv', 'e2.mkv']
+        fake_detector.detect_show_intro.return_value = {
+            'intro_start_time': 0,
+            'intro_end_time': 263,
+            'episode_count': 2,
+            'matching_episode_count': 2,
+        }
+
+        with patch.object(context, 'AudioIntroDetector', return_value=fake_detector):
+            result = context.get_audio_intro_detection(dialog, {'file': '/videos/e1.mkv'})
+
+        self.assertEqual(result['intro_start_time'], 0)
+        self.assertEqual(result['intro_end_time'], 263)
+        self.assertEqual(result['source'], 'audio_detection')
+        dialog.yesno.assert_called_once()
 
 
 class TestDatabaseMigration(unittest.TestCase):

@@ -56,8 +56,48 @@ class DatabaseManager:
                     clean[key] = None
             else:
                 clean[key] = None
+        intro_duration = config.get('intro_duration')
+        if intro_duration is not None:
+            if isinstance(intro_duration, (int, float)) and 0 <= intro_duration <= 86400:
+                clean['intro_duration'] = int(intro_duration)
+            else:
+                clean['intro_duration'] = None
+        else:
+            clean['intro_duration'] = None
         clean['use_chapters'] = bool(config.get('use_chapters', False))
         clean['config_created_at'] = config.get('config_created_at')
+        return clean
+
+    @staticmethod
+    def _validate_import_episode(episode):
+        """Validate and sanitize imported episode override values."""
+        if not isinstance(episode, dict):
+            return None
+        season = episode.get('season')
+        episode_number = episode.get('episode')
+        if not isinstance(season, int) or season < 0 or season > 10000:
+            return None
+        if not isinstance(episode_number, int) or episode_number < 0 or episode_number > 10000:
+            return None
+
+        clean = {
+            'season': season,
+            'episode': episode_number,
+            'source': episode.get('source') if isinstance(episode.get('source'), str) else None,
+            'created_at': episode.get('created_at')
+        }
+        for key in ['intro_start_chapter', 'intro_end_chapter']:
+            val = episode.get(key)
+            if val is not None:
+                clean[key] = val if isinstance(val, int) and 0 < val < 10000 else None
+            else:
+                clean[key] = None
+        for key in ['intro_start_time', 'intro_end_time', 'outro_start_time']:
+            val = episode.get(key)
+            if val is not None:
+                clean[key] = float(val) if isinstance(val, (int, float)) and 0 <= val <= 86400 else None
+            else:
+                clean[key] = None
         return clean
 
     def _get_backup_restore_path(self):
@@ -199,7 +239,7 @@ class DatabaseManager:
                 SELECT
                     s.id, s.title, s.created_at,
                     c.use_chapters, c.intro_start_chapter, c.intro_end_chapter,
-                    c.intro_start_time, c.intro_end_time, c.outro_start_time,
+                    c.intro_duration, c.intro_start_time, c.intro_end_time, c.outro_start_time,
                     c.created_at as config_created_at
                 FROM shows s
                 LEFT JOIN shows_config c ON s.id = c.show_id
@@ -216,12 +256,35 @@ class DatabaseManager:
                         'use_chapters': bool(row[3]) if row[3] is not None else None,
                         'intro_start_chapter': row[4],
                         'intro_end_chapter': row[5],
-                        'intro_start_time': row[6],
-                        'intro_end_time': row[7],
-                        'outro_start_time': row[8],
-                        'config_created_at': row[9]
+                        'intro_duration': row[6],
+                        'intro_start_time': row[7],
+                        'intro_end_time': row[8],
+                        'outro_start_time': row[9],
+                        'config_created_at': row[10]
                     } if row[3] is not None else None
                 }
+
+                cursor.execute("""
+                    SELECT season, episode, intro_start_chapter, intro_end_chapter,
+                           intro_start_time, intro_end_time, outro_start_time, source, created_at
+                    FROM episodes
+                    WHERE show_id = ?
+                    ORDER BY season, episode
+                """, (row[0],))
+                show_data['episodes'] = [
+                    {
+                        'season': ep[0],
+                        'episode': ep[1],
+                        'intro_start_chapter': ep[2],
+                        'intro_end_chapter': ep[3],
+                        'intro_start_time': ep[4],
+                        'intro_end_time': ep[5],
+                        'outro_start_time': ep[6],
+                        'source': ep[7],
+                        'created_at': ep[8]
+                    }
+                    for ep in cursor.fetchall()
+                ]
                 shows_data.append(show_data)
 
             conn.close()
@@ -355,6 +418,7 @@ class DatabaseManager:
                 # Clear existing data
                 conn = db._get_connection()
                 cursor = conn.cursor()
+                cursor.execute('DELETE FROM episodes')
                 cursor.execute('DELETE FROM shows_config')
                 cursor.execute('DELETE FROM shows')
                 conn.commit()
@@ -432,27 +496,29 @@ class DatabaseManager:
                         if config_created_at:
                             cursor.execute('''
                                 INSERT OR REPLACE INTO shows_config
-                                (show_id, use_chapters, intro_start_chapter, intro_end_chapter,
+                                (show_id, use_chapters, intro_start_chapter, intro_end_chapter, intro_duration,
                                  intro_start_time, intro_end_time, outro_start_time, created_at)
-                                VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?)
+                                VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
                             ''', (
                                 show_id,
                                 True,
                                 config.get('intro_start_chapter'),
                                 config.get('intro_end_chapter'),
+                                config.get('intro_duration'),
                                 config_created_at
                             ))
                         else:
                             cursor.execute('''
                                 INSERT OR REPLACE INTO shows_config
-                                (show_id, use_chapters, intro_start_chapter, intro_end_chapter,
+                                (show_id, use_chapters, intro_start_chapter, intro_end_chapter, intro_duration,
                                  intro_start_time, intro_end_time, outro_start_time)
-                                VALUES (?, ?, ?, ?, NULL, NULL, NULL)
+                                VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)
                             ''', (
                                 show_id,
                                 True,
                                 config.get('intro_start_chapter'),
-                                config.get('intro_end_chapter')
+                                config.get('intro_end_chapter'),
+                                config.get('intro_duration')
                             ))
                     else:
                         if config_created_at:
@@ -482,6 +548,49 @@ class DatabaseManager:
                                 config.get('intro_end_time'),
                                 config.get('outro_start_time')
                             ))
+
+                    episodes = show_data.get('episodes', [])
+                    if isinstance(episodes, list):
+                        for episode_data in episodes[:5000]:
+                            episode_config = self._validate_import_episode(episode_data)
+                            if not episode_config:
+                                skipped_count += 1
+                                continue
+                            if episode_config.get('created_at'):
+                                cursor.execute('''
+                                    INSERT OR REPLACE INTO episodes
+                                    (show_id, season, episode, intro_start_chapter, intro_end_chapter,
+                                     intro_start_time, intro_end_time, outro_start_time, source, created_at)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ''', (
+                                    show_id,
+                                    episode_config.get('season'),
+                                    episode_config.get('episode'),
+                                    episode_config.get('intro_start_chapter'),
+                                    episode_config.get('intro_end_chapter'),
+                                    episode_config.get('intro_start_time'),
+                                    episode_config.get('intro_end_time'),
+                                    episode_config.get('outro_start_time'),
+                                    episode_config.get('source'),
+                                    episode_config.get('created_at')
+                                ))
+                            else:
+                                cursor.execute('''
+                                    INSERT OR REPLACE INTO episodes
+                                    (show_id, season, episode, intro_start_chapter, intro_end_chapter,
+                                     intro_start_time, intro_end_time, outro_start_time, source)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ''', (
+                                    show_id,
+                                    episode_config.get('season'),
+                                    episode_config.get('episode'),
+                                    episode_config.get('intro_start_chapter'),
+                                    episode_config.get('intro_end_chapter'),
+                                    episode_config.get('intro_start_time'),
+                                    episode_config.get('intro_end_time'),
+                                    episode_config.get('outro_start_time'),
+                                    episode_config.get('source')
+                                ))
 
                     imported_count += 1
                     xbmc.log(f'SkipIntro: Imported {title}', xbmc.LOGDEBUG)
