@@ -321,13 +321,13 @@ def format_seconds(seconds):
     return f"{minutes:02d}:{secs:02d}"
 
 def get_audio_intro_detection(dialog, item):
-    """Auto-detect show intro timing from music-to-dialogue audio segments."""
+    """Auto-detect show intro timing from common cross-episode audio."""
     if not item or not item.get('file'):
         dialog.notification('Skip Intro', 'No episode file selected', xbmcgui.NOTIFICATION_ERROR)
         return None
 
     try:
-        detector = AudioIntroDetector()
+        detector = AudioIntroDetector(backend='fingerprint')
         candidates = detector.find_episode_candidates(item['file'])
         dialog.notification(
             'Skip Intro',
@@ -337,7 +337,7 @@ def get_audio_intro_detection(dialog, item):
 
         detected = detector.detect_show_intro(candidates)
         if not detected:
-            dialog.notification('Skip Intro', 'No music-to-dialogue intro found', xbmcgui.NOTIFICATION_WARNING)
+            dialog.notification('Skip Intro', 'No common intro audio found', xbmcgui.NOTIFICATION_WARNING)
             return None
 
         intro_start = detected.get('intro_start_time') or 0

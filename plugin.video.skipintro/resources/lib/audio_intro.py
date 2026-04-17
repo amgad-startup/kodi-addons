@@ -1,6 +1,8 @@
+import array
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -20,6 +22,13 @@ DEFAULT_MAX_EPISODES = 3
 DEFAULT_MIN_MUSIC_SECONDS = 2 * 60
 DEFAULT_MIN_SPEECH_SECONDS = 12
 DEFAULT_EPISODE_TOLERANCE_SECONDS = 25
+DEFAULT_FINGERPRINT_SAMPLE_RATE = 8000
+DEFAULT_FINGERPRINT_WINDOW_SECONDS = 2
+DEFAULT_FINGERPRINT_MIN_COMMON_SECONDS = 90
+DEFAULT_FINGERPRINT_HAMMING_DISTANCE = 16
+FINGERPRINT_BITS = 64
+FINGERPRINT_BUCKETS = FINGERPRINT_BITS // 2
+PCM_SAMPLE_WIDTH_BYTES = 2
 
 
 class AudioIntroDetectionError(Exception):
@@ -45,6 +54,11 @@ class AudioIntroDetector:
         min_speech_seconds: int = DEFAULT_MIN_SPEECH_SECONDS,
         episode_tolerance_seconds: int = DEFAULT_EPISODE_TOLERANCE_SECONDS,
         ffmpeg_path: Optional[str] = None,
+        backend: str = 'segments',
+        fingerprint_sample_rate: int = DEFAULT_FINGERPRINT_SAMPLE_RATE,
+        fingerprint_window_seconds: int = DEFAULT_FINGERPRINT_WINDOW_SECONDS,
+        fingerprint_min_common_seconds: int = DEFAULT_FINGERPRINT_MIN_COMMON_SECONDS,
+        fingerprint_hamming_distance: int = DEFAULT_FINGERPRINT_HAMMING_DISTANCE,
         segmenter_factory: Optional[Callable[[], Callable[[str], Iterable[Tuple[str, float, float]]]]] = None,
     ):
         self.max_scan_seconds = max_scan_seconds
@@ -53,11 +67,19 @@ class AudioIntroDetector:
         self.min_speech_seconds = min_speech_seconds
         self.episode_tolerance_seconds = episode_tolerance_seconds
         self.ffmpeg_path = ffmpeg_path
+        self.backend = backend
+        self.fingerprint_sample_rate = fingerprint_sample_rate
+        self.fingerprint_window_seconds = fingerprint_window_seconds
+        self.fingerprint_min_common_seconds = fingerprint_min_common_seconds
+        self.fingerprint_hamming_distance = fingerprint_hamming_distance
         self._segmenter_factory = segmenter_factory
         self._segmenter = None
 
     def detect_show_intro(self, episode_files: Sequence[str]) -> Optional[Dict[str, float]]:
         """Analyze a few episodes and return a show-level intro estimate."""
+        if self.backend == 'fingerprint':
+            return self.detect_show_intro_by_fingerprint(episode_files)
+
         detections = []
         for episode_file in episode_files[:self.max_episodes]:
             try:
@@ -98,6 +120,80 @@ class AudioIntroDetector:
             'matching_episode_count': len(matching),
             'episode_detections': detections,
             'source': 'audio'
+        }
+
+    def detect_show_intro_by_fingerprint(self, episode_files: Sequence[str]) -> Optional[Dict[str, float]]:
+        """Find common intro audio across episodes using lightweight fingerprints."""
+        ffmpeg = self._find_ffmpeg()
+        analyzed = []
+
+        for episode_file in episode_files[:self.max_episodes]:
+            try:
+                fingerprints = self._fingerprint_file(episode_file, ffmpeg)
+            except AudioIntroDependencyError:
+                raise
+            except AudioIntroDetectionError as e:
+                xbmc.log(f'SkipIntro: Audio fingerprint detection skipped {sanitize_path(episode_file)}: {str(e)}', xbmc.LOGWARNING)
+                continue
+            except Exception as e:
+                xbmc.log(f'SkipIntro: Audio fingerprint detection failed for {sanitize_path(episode_file)}: {str(e)}', xbmc.LOGWARNING)
+                continue
+
+            if fingerprints:
+                analyzed.append({'file': episode_file, 'fingerprints': fingerprints})
+
+        if len(analyzed) < 2:
+            return None
+
+        best = None
+        for left_index in range(len(analyzed)):
+            for right_index in range(left_index + 1, len(analyzed)):
+                pair_match = self._find_common_fingerprint_run(
+                    analyzed[left_index]['fingerprints'],
+                    analyzed[right_index]['fingerprints']
+                )
+                if not pair_match:
+                    continue
+
+                duration = pair_match['duration']
+                if duration < self.fingerprint_min_common_seconds:
+                    continue
+
+                if self._is_better_fingerprint_match(pair_match, best):
+                    best = dict(pair_match)
+                    best['left_file'] = analyzed[left_index]['file']
+                    best['right_file'] = analyzed[right_index]['file']
+
+        if not best:
+            return None
+
+        detections = [
+            {
+                'file': best['left_file'],
+                'intro_start_time': best['left_start_time'],
+                'intro_end_time': best['left_end_time'],
+                'match_duration': best['duration'],
+                'source': 'audio_fingerprint'
+            },
+            {
+                'file': best['right_file'],
+                'intro_start_time': best['right_start_time'],
+                'intro_end_time': best['right_end_time'],
+                'match_duration': best['duration'],
+                'source': 'audio_fingerprint'
+            }
+        ]
+        start_times = sorted(d['intro_start_time'] for d in detections)
+        end_times = sorted(d['intro_end_time'] for d in detections)
+
+        return {
+            'intro_start_time': start_times[len(start_times) // 2],
+            'intro_end_time': end_times[len(end_times) // 2],
+            'episode_count': len(analyzed),
+            'matching_episode_count': len(detections),
+            'episode_detections': detections,
+            'match_duration': best['duration'],
+            'source': 'audio_fingerprint'
         }
 
     def analyze_file(self, video_path: str) -> Optional[Dict[str, float]]:
@@ -294,6 +390,183 @@ class AudioIntroDetector:
             ) from e
 
         return output_path
+
+    def _fingerprint_file(self, video_path: str, ffmpeg: str) -> List[Dict[str, float]]:
+        pcm = self._extract_pcm_clip(video_path, ffmpeg)
+        return self._fingerprint_pcm(pcm)
+
+    def _extract_pcm_clip(self, video_path: str, ffmpeg: str) -> bytes:
+        input_path = self._resolve_input_path(video_path)
+        command = [
+            ffmpeg,
+            '-nostdin',
+            '-hide_banner',
+            '-loglevel', 'error',
+            '-i', input_path,
+            '-t', str(self.max_scan_seconds),
+            '-vn',
+            '-ac', '1',
+            '-ar', str(self.fingerprint_sample_rate),
+            '-f', 's16le',
+            '-',
+        ]
+
+        try:
+            result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as e:
+            error = e.stderr.decode('utf-8', errors='replace').strip()
+            if input_path:
+                error = error.replace(input_path, '[input]')
+            raise AudioIntroDetectionError(
+                f'ffmpeg could not extract fingerprint audio from {sanitize_path(video_path)}: {error}'
+            ) from e
+
+        return result.stdout
+
+    def _fingerprint_pcm(self, pcm: bytes) -> List[Dict[str, float]]:
+        if not pcm:
+            return []
+
+        sample_data = pcm[:len(pcm) - (len(pcm) % PCM_SAMPLE_WIDTH_BYTES)]
+        samples = array.array('h')
+        samples.frombytes(sample_data)
+        if sys.byteorder != 'little':
+            samples.byteswap()
+
+        window_size = int(self.fingerprint_sample_rate * self.fingerprint_window_seconds)
+        if window_size <= 0 or len(samples) < window_size:
+            return []
+
+        fingerprints = []
+        for start in range(0, len(samples) - window_size + 1, window_size):
+            window = samples[start:start + window_size]
+            fingerprint_hash, rms = self._fingerprint_window(window)
+            fingerprints.append({
+                'time': start / float(self.fingerprint_sample_rate),
+                'hash': fingerprint_hash,
+                'rms': rms
+            })
+        return fingerprints
+
+    @staticmethod
+    def _fingerprint_window(window: Sequence[int]) -> Tuple[Optional[int], float]:
+        if not window:
+            return None, 0.0
+
+        rms = (sum(int(sample) * int(sample) for sample in window) / float(len(window))) ** 0.5
+        if rms <= 1:
+            return None, rms
+
+        bucket_size = max(1, len(window) // FINGERPRINT_BUCKETS)
+        energies = []
+        crossings = []
+        for bucket_index in range(FINGERPRINT_BUCKETS):
+            start = bucket_index * bucket_size
+            end = len(window) if bucket_index == FINGERPRINT_BUCKETS - 1 else min(len(window), start + bucket_size)
+            if start >= end:
+                break
+
+            previous = int(window[start])
+            crossing_count = 0
+            absolute_sum = 0
+            for sample in window[start:end]:
+                sample = int(sample)
+                absolute_sum += abs(sample)
+                if (previous < 0 <= sample) or (previous >= 0 > sample):
+                    crossing_count += 1
+                previous = sample
+
+            size = float(end - start)
+            energies.append(absolute_sum / size)
+            crossings.append(crossing_count / size)
+
+        if not energies:
+            return None, rms
+
+        average_energy = sum(energies) / len(energies)
+        average_crossings = sum(crossings) / len(crossings)
+        if average_energy <= 1:
+            return None, rms
+
+        fingerprint_hash = 0
+        for index, energy in enumerate(energies):
+            if energy >= average_energy:
+                fingerprint_hash |= 1 << index
+
+        offset = len(energies)
+        for index, crossing_rate in enumerate(crossings):
+            if crossing_rate >= average_crossings:
+                fingerprint_hash |= 1 << (offset + index)
+
+        return fingerprint_hash, rms
+
+    def _find_common_fingerprint_run(self, left: List[Dict[str, float]], right: List[Dict[str, float]]) -> Optional[Dict[str, float]]:
+        best = None
+        previous_runs = {}
+
+        for left_index, left_item in enumerate(left):
+            current_runs = {}
+            left_hash = left_item.get('hash')
+            if left_hash is None:
+                previous_runs = {}
+                continue
+
+            for right_index, right_item in enumerate(right):
+                right_hash = right_item.get('hash')
+                if right_hash is None:
+                    continue
+
+                distance = self._hamming_distance(int(left_hash), int(right_hash))
+                if distance > self.fingerprint_hamming_distance:
+                    continue
+
+                previous = previous_runs.get(right_index - 1)
+                if previous:
+                    length = previous['length'] + 1
+                    distance_total = previous['distance_total'] + distance
+                else:
+                    length = 1
+                    distance_total = distance
+
+                run = {
+                    'length': length,
+                    'distance_total': distance_total,
+                    'left_end_index': left_index,
+                    'right_end_index': right_index
+                }
+                current_runs[right_index] = run
+
+                duration = length * self.fingerprint_window_seconds
+                if not best or duration > best['duration']:
+                    left_start_index = left_index - length + 1
+                    right_start_index = right_index - length + 1
+                    best = {
+                        'duration': duration,
+                        'left_start_time': left[left_start_index]['time'],
+                        'left_end_time': left[left_index]['time'] + self.fingerprint_window_seconds,
+                        'right_start_time': right[right_start_index]['time'],
+                        'right_end_time': right[right_index]['time'] + self.fingerprint_window_seconds,
+                        'average_distance': distance_total / float(length),
+                        'start_spread': abs(left[left_start_index]['time'] - right[right_start_index]['time'])
+                    }
+
+            previous_runs = current_runs
+
+        return best
+
+    @staticmethod
+    def _is_better_fingerprint_match(candidate: Dict[str, float], current: Optional[Dict[str, float]]) -> bool:
+        if not current:
+            return True
+        if candidate['duration'] != current['duration']:
+            return candidate['duration'] > current['duration']
+        if candidate.get('start_spread', 0) != current.get('start_spread', 0):
+            return candidate.get('start_spread', 0) < current.get('start_spread', 0)
+        return candidate.get('average_distance', 0) < current.get('average_distance', 0)
+
+    @staticmethod
+    def _hamming_distance(left: int, right: int) -> int:
+        return bin(left ^ right).count('1')
 
     def _find_ffmpeg(self) -> str:
         if self.ffmpeg_path:
