@@ -25,7 +25,11 @@ DEFAULT_EPISODE_TOLERANCE_SECONDS = 25
 DEFAULT_FINGERPRINT_SAMPLE_RATE = 8000
 DEFAULT_FINGERPRINT_WINDOW_SECONDS = 2
 DEFAULT_FINGERPRINT_MIN_COMMON_SECONDS = 90
+DEFAULT_FINGERPRINT_MIN_OUTRO_SECONDS = 30
 DEFAULT_FINGERPRINT_HAMMING_DISTANCE = 16
+DEFAULT_INTRO_LIMIT_RATIO = 1.0 / 3.0
+DEFAULT_OUTRO_SEARCH_RATIO = 2.0 / 3.0
+DEFAULT_FFMPEG_TIMEOUT_SECONDS = 180
 FINGERPRINT_BITS = 64
 FINGERPRINT_BUCKETS = FINGERPRINT_BITS // 2
 PCM_SAMPLE_WIDTH_BYTES = 2
@@ -58,7 +62,11 @@ class AudioIntroDetector:
         fingerprint_sample_rate: int = DEFAULT_FINGERPRINT_SAMPLE_RATE,
         fingerprint_window_seconds: int = DEFAULT_FINGERPRINT_WINDOW_SECONDS,
         fingerprint_min_common_seconds: int = DEFAULT_FINGERPRINT_MIN_COMMON_SECONDS,
+        fingerprint_min_outro_seconds: int = DEFAULT_FINGERPRINT_MIN_OUTRO_SECONDS,
         fingerprint_hamming_distance: int = DEFAULT_FINGERPRINT_HAMMING_DISTANCE,
+        intro_limit_ratio: float = DEFAULT_INTRO_LIMIT_RATIO,
+        outro_search_ratio: float = DEFAULT_OUTRO_SEARCH_RATIO,
+        ffmpeg_timeout_seconds: int = DEFAULT_FFMPEG_TIMEOUT_SECONDS,
         segmenter_factory: Optional[Callable[[], Callable[[str], Iterable[Tuple[str, float, float]]]]] = None,
     ):
         self.max_scan_seconds = max_scan_seconds
@@ -71,7 +79,11 @@ class AudioIntroDetector:
         self.fingerprint_sample_rate = fingerprint_sample_rate
         self.fingerprint_window_seconds = fingerprint_window_seconds
         self.fingerprint_min_common_seconds = fingerprint_min_common_seconds
+        self.fingerprint_min_outro_seconds = fingerprint_min_outro_seconds
         self.fingerprint_hamming_distance = fingerprint_hamming_distance
+        self.intro_limit_ratio = intro_limit_ratio
+        self.outro_search_ratio = outro_search_ratio
+        self.ffmpeg_timeout_seconds = ffmpeg_timeout_seconds
         self._segmenter_factory = segmenter_factory
         self._segmenter = None
 
@@ -129,6 +141,7 @@ class AudioIntroDetector:
 
         for episode_file in episode_files[:self.max_episodes]:
             try:
+                duration = self._probe_duration(episode_file)
                 fingerprints = self._fingerprint_file(episode_file, ffmpeg)
             except AudioIntroDependencyError:
                 raise
@@ -140,7 +153,11 @@ class AudioIntroDetector:
                 continue
 
             if fingerprints:
-                analyzed.append({'file': episode_file, 'fingerprints': fingerprints})
+                analyzed.append({
+                    'file': episode_file,
+                    'duration': duration,
+                    'fingerprints': fingerprints
+                })
 
         if len(analyzed) < 2:
             return None
@@ -150,7 +167,9 @@ class AudioIntroDetector:
             for right_index in range(left_index + 1, len(analyzed)):
                 pair_match = self._find_common_fingerprint_run(
                     analyzed[left_index]['fingerprints'],
-                    analyzed[right_index]['fingerprints']
+                    analyzed[right_index]['fingerprints'],
+                    left_max_end=self._intro_end_limit(analyzed[left_index].get('duration')),
+                    right_max_end=self._intro_end_limit(analyzed[right_index].get('duration'))
                 )
                 if not pair_match:
                     continue
@@ -185,15 +204,102 @@ class AudioIntroDetector:
         ]
         start_times = sorted(d['intro_start_time'] for d in detections)
         end_times = sorted(d['intro_end_time'] for d in detections)
+        outro = self._detect_outro_by_fingerprint(analyzed, ffmpeg)
 
-        return {
+        result = {
             'intro_start_time': start_times[len(start_times) // 2],
             'intro_end_time': end_times[len(end_times) // 2],
+            'outro_start_time': None,
             'episode_count': len(analyzed),
             'matching_episode_count': len(detections),
             'episode_detections': detections,
             'match_duration': best['duration'],
             'source': 'audio_fingerprint'
+        }
+        if outro:
+            result['outro_start_time'] = outro['outro_start_time']
+            result['outro_match_duration'] = outro['duration']
+            result['outro_detections'] = outro['detections']
+        return result
+
+    def _detect_outro_by_fingerprint(self, analyzed: List[Dict[str, object]], ffmpeg: str) -> Optional[Dict[str, object]]:
+        tail_analyzed = []
+        for item in analyzed:
+            duration = item.get('duration')
+            if not duration:
+                continue
+
+            tail_duration = min(self.max_scan_seconds, float(duration))
+            tail_start = max(0.0, float(duration) - tail_duration)
+            try:
+                fingerprints = self._fingerprint_file(
+                    str(item['file']),
+                    ffmpeg,
+                    start_seconds=tail_start,
+                    scan_seconds=tail_duration,
+                    base_time=tail_start
+                )
+            except AudioIntroDetectionError as e:
+                xbmc.log(f'SkipIntro: Audio outro fingerprint detection skipped {sanitize_path(str(item["file"]))}: {str(e)}', xbmc.LOGWARNING)
+                continue
+            except Exception as e:
+                xbmc.log(f'SkipIntro: Audio outro fingerprint detection failed for {sanitize_path(str(item["file"]))}: {str(e)}', xbmc.LOGWARNING)
+                continue
+
+            if fingerprints:
+                tail_analyzed.append({
+                    'file': item['file'],
+                    'duration': duration,
+                    'fingerprints': fingerprints
+                })
+
+        if len(tail_analyzed) < 2:
+            return None
+
+        best = None
+        for left_index in range(len(tail_analyzed)):
+            for right_index in range(left_index + 1, len(tail_analyzed)):
+                left_duration = float(tail_analyzed[left_index]['duration'])
+                right_duration = float(tail_analyzed[right_index]['duration'])
+                pair_match = self._find_common_fingerprint_run(
+                    tail_analyzed[left_index]['fingerprints'],
+                    tail_analyzed[right_index]['fingerprints'],
+                    left_min_start=left_duration * self.outro_search_ratio,
+                    right_min_start=right_duration * self.outro_search_ratio
+                )
+                if not pair_match:
+                    continue
+                if pair_match['duration'] < self.fingerprint_min_outro_seconds:
+                    continue
+                if self._is_better_outro_match(pair_match, best):
+                    best = dict(pair_match)
+                    best['left_file'] = tail_analyzed[left_index]['file']
+                    best['right_file'] = tail_analyzed[right_index]['file']
+
+        if not best:
+            return None
+
+        detections = [
+            {
+                'file': best['left_file'],
+                'outro_start_time': best['left_start_time'],
+                'outro_end_time': best['left_end_time'],
+                'match_duration': best['duration'],
+                'source': 'audio_fingerprint'
+            },
+            {
+                'file': best['right_file'],
+                'outro_start_time': best['right_start_time'],
+                'outro_end_time': best['right_end_time'],
+                'match_duration': best['duration'],
+                'source': 'audio_fingerprint'
+            }
+        ]
+        start_times = sorted(d['outro_start_time'] for d in detections)
+        return {
+            'outro_start_time': start_times[len(start_times) // 2],
+            'duration': best['duration'],
+            'detections': detections
         }
 
     def analyze_file(self, video_path: str) -> Optional[Dict[str, float]]:
@@ -376,7 +482,13 @@ class AudioIntroDetector:
         ]
 
         try:
-            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=self.ffmpeg_timeout_seconds
+            )
         except subprocess.CalledProcessError as e:
             try:
                 os.unlink(output_path)
@@ -388,31 +500,63 @@ class AudioIntroDetector:
             raise AudioIntroDetectionError(
                 f'ffmpeg could not extract audio from {sanitize_path(video_path)}: {error}'
             ) from e
+        except subprocess.TimeoutExpired as e:
+            try:
+                os.unlink(output_path)
+            except OSError:
+                pass
+            raise AudioIntroDetectionError(
+                f'ffmpeg timed out extracting audio from {sanitize_path(video_path)} '
+                f'after {self.ffmpeg_timeout_seconds} seconds'
+            ) from e
 
         return output_path
 
-    def _fingerprint_file(self, video_path: str, ffmpeg: str) -> List[Dict[str, float]]:
-        pcm = self._extract_pcm_clip(video_path, ffmpeg)
-        return self._fingerprint_pcm(pcm)
+    def _fingerprint_file(
+        self,
+        video_path: str,
+        ffmpeg: str,
+        start_seconds: Optional[float] = None,
+        scan_seconds: Optional[float] = None,
+        base_time: float = 0.0
+    ) -> List[Dict[str, float]]:
+        pcm = self._extract_pcm_clip(video_path, ffmpeg, start_seconds=start_seconds, scan_seconds=scan_seconds)
+        return self._fingerprint_pcm(pcm, base_time=base_time)
 
-    def _extract_pcm_clip(self, video_path: str, ffmpeg: str) -> bytes:
+    def _extract_pcm_clip(
+        self,
+        video_path: str,
+        ffmpeg: str,
+        start_seconds: Optional[float] = None,
+        scan_seconds: Optional[float] = None
+    ) -> bytes:
         input_path = self._resolve_input_path(video_path)
         command = [
             ffmpeg,
             '-nostdin',
             '-hide_banner',
             '-loglevel', 'error',
+        ]
+        if start_seconds is not None and start_seconds > 0:
+            command.extend(['-ss', str(round(float(start_seconds), 3))])
+        command.extend([
             '-i', input_path,
-            '-t', str(self.max_scan_seconds),
+            '-t', str(round(float(scan_seconds if scan_seconds is not None else self.max_scan_seconds), 3)),
             '-vn',
             '-ac', '1',
             '-ar', str(self.fingerprint_sample_rate),
             '-f', 's16le',
             '-',
-        ]
+        ])
 
         try:
-            result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            result = subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=self.ffmpeg_timeout_seconds
+            )
         except subprocess.CalledProcessError as e:
             error = e.stderr.decode('utf-8', errors='replace').strip()
             if input_path:
@@ -420,10 +564,15 @@ class AudioIntroDetector:
             raise AudioIntroDetectionError(
                 f'ffmpeg could not extract fingerprint audio from {sanitize_path(video_path)}: {error}'
             ) from e
+        except subprocess.TimeoutExpired as e:
+            raise AudioIntroDetectionError(
+                f'ffmpeg timed out extracting fingerprint audio from {sanitize_path(video_path)} '
+                f'after {self.ffmpeg_timeout_seconds} seconds'
+            ) from e
 
         return result.stdout
 
-    def _fingerprint_pcm(self, pcm: bytes) -> List[Dict[str, float]]:
+    def _fingerprint_pcm(self, pcm: bytes, base_time: float = 0.0) -> List[Dict[str, float]]:
         if not pcm:
             return []
 
@@ -442,7 +591,7 @@ class AudioIntroDetector:
             window = samples[start:start + window_size]
             fingerprint_hash, rms = self._fingerprint_window(window)
             fingerprints.append({
-                'time': start / float(self.fingerprint_sample_rate),
+                'time': float(base_time) + start / float(self.fingerprint_sample_rate),
                 'hash': fingerprint_hash,
                 'rms': rms
             })
@@ -500,7 +649,15 @@ class AudioIntroDetector:
 
         return fingerprint_hash, rms
 
-    def _find_common_fingerprint_run(self, left: List[Dict[str, float]], right: List[Dict[str, float]]) -> Optional[Dict[str, float]]:
+    def _find_common_fingerprint_run(
+        self,
+        left: List[Dict[str, float]],
+        right: List[Dict[str, float]],
+        left_min_start: Optional[float] = None,
+        right_min_start: Optional[float] = None,
+        left_max_end: Optional[float] = None,
+        right_max_end: Optional[float] = None
+    ) -> Optional[Dict[str, float]]:
         best = None
         previous_runs = {}
 
@@ -537,22 +694,49 @@ class AudioIntroDetector:
                 current_runs[right_index] = run
 
                 duration = length * self.fingerprint_window_seconds
-                if not best or duration > best['duration']:
-                    left_start_index = left_index - length + 1
-                    right_start_index = right_index - length + 1
-                    best = {
-                        'duration': duration,
-                        'left_start_time': left[left_start_index]['time'],
-                        'left_end_time': left[left_index]['time'] + self.fingerprint_window_seconds,
-                        'right_start_time': right[right_start_index]['time'],
-                        'right_end_time': right[right_index]['time'] + self.fingerprint_window_seconds,
-                        'average_distance': distance_total / float(length),
-                        'start_spread': abs(left[left_start_index]['time'] - right[right_start_index]['time'])
-                    }
+                left_start_index = left_index - length + 1
+                right_start_index = right_index - length + 1
+                candidate = {
+                    'duration': duration,
+                    'left_start_time': left[left_start_index]['time'],
+                    'left_end_time': left[left_index]['time'] + self.fingerprint_window_seconds,
+                    'right_start_time': right[right_start_index]['time'],
+                    'right_end_time': right[right_index]['time'] + self.fingerprint_window_seconds,
+                    'average_distance': distance_total / float(length),
+                    'start_spread': abs(left[left_start_index]['time'] - right[right_start_index]['time'])
+                }
+                if not self._fingerprint_match_in_bounds(
+                    candidate,
+                    left_min_start=left_min_start,
+                    right_min_start=right_min_start,
+                    left_max_end=left_max_end,
+                    right_max_end=right_max_end
+                ):
+                    continue
+                if self._is_better_fingerprint_match(candidate, best):
+                    best = candidate
 
             previous_runs = current_runs
 
         return best
+
+    @staticmethod
+    def _fingerprint_match_in_bounds(
+        match: Dict[str, float],
+        left_min_start: Optional[float] = None,
+        right_min_start: Optional[float] = None,
+        left_max_end: Optional[float] = None,
+        right_max_end: Optional[float] = None
+    ) -> bool:
+        if left_min_start is not None and match['left_start_time'] < left_min_start:
+            return False
+        if right_min_start is not None and match['right_start_time'] < right_min_start:
+            return False
+        if left_max_end is not None and match['left_end_time'] > left_max_end:
+            return False
+        if right_max_end is not None and match['right_end_time'] > right_max_end:
+            return False
+        return True
 
     @staticmethod
     def _is_better_fingerprint_match(candidate: Dict[str, float], current: Optional[Dict[str, float]]) -> bool:
@@ -565,8 +749,82 @@ class AudioIntroDetector:
         return candidate.get('average_distance', 0) < current.get('average_distance', 0)
 
     @staticmethod
+    def _is_better_outro_match(candidate: Dict[str, float], current: Optional[Dict[str, float]]) -> bool:
+        if not current:
+            return True
+        if candidate['duration'] != current['duration']:
+            return candidate['duration'] > current['duration']
+        if candidate.get('start_spread', 0) != current.get('start_spread', 0):
+            return candidate.get('start_spread', 0) < current.get('start_spread', 0)
+        candidate_start = min(candidate.get('left_start_time', 0), candidate.get('right_start_time', 0))
+        current_start = min(current.get('left_start_time', 0), current.get('right_start_time', 0))
+        if candidate_start != current_start:
+            return candidate_start > current_start
+        return candidate.get('average_distance', 0) < current.get('average_distance', 0)
+
+    def _intro_end_limit(self, duration: Optional[float]) -> Optional[float]:
+        if not duration:
+            return None
+        return float(duration) * self.intro_limit_ratio
+
+    def _probe_duration(self, video_path: str) -> Optional[float]:
+        ffprobe = self._find_ffprobe()
+        if not ffprobe:
+            xbmc.log('SkipIntro: ffprobe not found; intro/outro audio bounds will be limited to scanned audio only', xbmc.LOGWARNING)
+            return None
+
+        input_path = self._resolve_input_path(video_path)
+        command = [
+            ffprobe,
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            input_path,
+        ]
+
+        try:
+            result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            duration = float(result.stdout.decode('utf-8', errors='replace').strip())
+        except subprocess.TimeoutExpired:
+            xbmc.log(
+                f'SkipIntro: Could not probe duration for {sanitize_path(video_path)}: '
+                'ffprobe timed out after 30 seconds',
+                xbmc.LOGWARNING
+            )
+            return None
+        except subprocess.CalledProcessError as e:
+            error = ''
+            if e.stderr:
+                error = e.stderr.decode('utf-8', errors='replace').strip()
+                error = error.replace(input_path, '[input]')
+            if not error:
+                error = f'ffprobe exited with status {e.returncode}'
+            xbmc.log(f'SkipIntro: Could not probe duration for {sanitize_path(video_path)}: {error}', xbmc.LOGWARNING)
+            return None
+        except (TypeError, ValueError):
+            xbmc.log(
+                f'SkipIntro: Could not probe duration for {sanitize_path(video_path)}: invalid duration output',
+                xbmc.LOGWARNING
+            )
+            return None
+
+        if duration <= 0:
+            return None
+        return duration
+
+    @staticmethod
     def _hamming_distance(left: int, right: int) -> int:
         return bin(left ^ right).count('1')
+
+    def _find_ffprobe(self) -> Optional[str]:
+        if self.ffmpeg_path:
+            ffmpeg_dir = os.path.dirname(self.ffmpeg_path)
+            ffprobe_name = 'ffprobe.exe' if os.path.basename(self.ffmpeg_path).lower().endswith('.exe') else 'ffprobe'
+            ffprobe_path = os.path.join(ffmpeg_dir, ffprobe_name)
+            if os.path.exists(ffprobe_path):
+                return ffprobe_path
+
+        return shutil.which('ffprobe')
 
     def _find_ffmpeg(self) -> str:
         if self.ffmpeg_path:

@@ -348,17 +348,24 @@ def get_audio_intro_detection(dialog, item):
 
         episode_count = detected.get('episode_count', 1)
         matching_count = detected.get('matching_episode_count', episode_count)
+        outro_start = detected.get('outro_start_time')
         message = (
             f'Detected intro from {format_seconds(intro_start)} to {format_seconds(intro_end)} '
             f'using {matching_count}/{episode_count} analyzed episode(s). Save this for the show?'
         )
+        if outro_start is not None:
+            message = (
+                f'Detected intro from {format_seconds(intro_start)} to {format_seconds(intro_end)} '
+                f'and outro at {format_seconds(outro_start)} '
+                f'using {matching_count}/{episode_count} analyzed episode(s). Save this for the show?'
+            )
         if not dialog.yesno('Skip Intro', message):
             return None
 
         return {
             'intro_start_time': intro_start,
             'intro_end_time': intro_end,
-            'outro_start_time': None,
+            'outro_start_time': outro_start,
             'source': 'audio_detection'
         }
 

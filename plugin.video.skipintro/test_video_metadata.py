@@ -871,6 +871,7 @@ class TestAudioIntroDetector(unittest.TestCase):
             fingerprint_hamming_distance=0
         )
         detector._find_ffmpeg = MagicMock(return_value='ffmpeg')
+        detector._probe_duration = MagicMock(return_value=120)
         detector._fingerprint_file = MagicMock(side_effect=[
             fingerprints([0x1111111111111111] + common + [0x2222222222222222]),
             fingerprints([0x3333333333333333] + common + [0x4444444444444444]),
@@ -904,6 +905,7 @@ class TestAudioIntroDetector(unittest.TestCase):
             fingerprint_hamming_distance=0
         )
         detector._find_ffmpeg = MagicMock(return_value='ffmpeg')
+        detector._probe_duration = MagicMock(return_value=120)
         detector._fingerprint_file = MagicMock(side_effect=[
             fingerprints([0x1111111111111111, 0x2222222222222222] + common),
             fingerprints(common + [0x3333333333333333]),
@@ -918,6 +920,74 @@ class TestAudioIntroDetector(unittest.TestCase):
             [d['file'] for d in result['episode_detections']],
             ['e2.strm', 'e3.strm']
         )
+
+    def test_detect_show_intro_by_fingerprint_rejects_late_intro_match(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        common = [
+            0xAAAAAAAAAAAAAAAA,
+            0xCCCCCCCCCCCCCCCC,
+            0xF0F0F0F0F0F0F0F0,
+            0x0F0F0F0F0F0F0F0F,
+        ]
+
+        def fingerprints(values):
+            return [{'time': index * 2, 'hash': value, 'rms': 1000} for index, value in enumerate(values)]
+
+        detector = AudioIntroDetector(
+            backend='fingerprint',
+            fingerprint_window_seconds=2,
+            fingerprint_min_common_seconds=6,
+            fingerprint_hamming_distance=0
+        )
+        detector._find_ffmpeg = MagicMock(return_value='ffmpeg')
+        detector._probe_duration = MagicMock(return_value=36)
+        detector._fingerprint_file = MagicMock(side_effect=[
+            fingerprints([0x1111111111111111] * 8 + common),
+            fingerprints([0x2222222222222222] * 8 + common),
+        ])
+
+        self.assertIsNone(detector.detect_show_intro(['e1.strm', 'e2.strm']))
+
+    def test_detect_show_intro_by_fingerprint_includes_outro(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        intro = [
+            0xAAAAAAAAAAAAAAAA,
+            0xCCCCCCCCCCCCCCCC,
+            0xF0F0F0F0F0F0F0F0,
+            0x0F0F0F0F0F0F0F0F,
+        ]
+        outro = [
+            0x1111111111111111,
+            0x2222222222222222,
+            0x3333333333333333,
+        ]
+
+        def fingerprints(values, start=0):
+            return [{'time': start + index * 2, 'hash': value, 'rms': 1000} for index, value in enumerate(values)]
+
+        detector = AudioIntroDetector(
+            backend='fingerprint',
+            fingerprint_window_seconds=2,
+            fingerprint_min_common_seconds=6,
+            fingerprint_min_outro_seconds=4,
+            fingerprint_hamming_distance=0
+        )
+        detector._find_ffmpeg = MagicMock(return_value='ffmpeg')
+        detector._probe_duration = MagicMock(return_value=90)
+        detector._fingerprint_file = MagicMock(side_effect=[
+            fingerprints(intro + [0x9999999999999999]),
+            fingerprints(intro + [0x8888888888888888]),
+            fingerprints([0x7777777777777777, 0x6666666666666666] + outro, start=78),
+            fingerprints([0x5555555555555555, 0x4444444444444444] + outro, start=78),
+        ])
+
+        result = detector.detect_show_intro(['e1.strm', 'e2.strm'])
+
+        self.assertEqual(result['intro_end_time'], 8)
+        self.assertEqual(result['outro_start_time'], 82)
+        self.assertEqual(result['outro_match_duration'], 6)
 
     def test_find_episode_candidates_uses_neighboring_video_files(self):
         from resources.lib.audio_intro import AudioIntroDetector
@@ -979,6 +1049,7 @@ class TestAudioIntroDetector(unittest.TestCase):
         try:
             run_mock.assert_called_once()
             self.assertTrue(run_mock.call_args.kwargs.get('check'))
+            self.assertEqual(run_mock.call_args.kwargs.get('timeout'), detector.ffmpeg_timeout_seconds)
             command = run_mock.call_args[0][0]
             self.assertIn(stream_url, command)
             self.assertIn('-t', command)
@@ -1010,6 +1081,57 @@ class TestAudioIntroDetector(unittest.TestCase):
 
         self.assertNotIn(stream_url, str(ctx.exception))
         self.assertIn('[input]', str(ctx.exception))
+
+    def test_extract_pcm_clip_timeout_redacts_strm_url(self):
+        from resources.lib.audio_intro import AudioIntroDetectionError, AudioIntroDetector
+
+        stream_url = 'https://stream.example.test/private-token/episode.m3u8'
+
+        class FakeStrmFile:
+            def read(self):
+                return stream_url
+            def close(self):
+                pass
+
+        detector = AudioIntroDetector(ffmpeg_timeout_seconds=12)
+        ffmpeg_error = subprocess.TimeoutExpired(
+            ['ffmpeg', '-i', stream_url],
+            timeout=12
+        )
+        with patch('resources.lib.audio_intro.xbmcvfs.File', return_value=FakeStrmFile()), \
+                patch('resources.lib.audio_intro.subprocess.run', side_effect=ffmpeg_error):
+            with self.assertRaises(AudioIntroDetectionError) as ctx:
+                detector._extract_pcm_clip('/media/Show.S01E01.strm', 'ffmpeg')
+
+        self.assertNotIn(stream_url, str(ctx.exception))
+        self.assertIn('timed out', str(ctx.exception))
+        self.assertIn('12 seconds', str(ctx.exception))
+
+    def test_probe_duration_timeout_redacts_strm_url(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        stream_url = 'https://stream.example.test/private-token/episode.m3u8'
+
+        class FakeStrmFile:
+            def read(self):
+                return stream_url
+            def close(self):
+                pass
+
+        detector = AudioIntroDetector()
+        detector._find_ffprobe = MagicMock(return_value='ffprobe')
+        ffprobe_error = subprocess.TimeoutExpired(
+            ['ffprobe', stream_url],
+            timeout=30
+        )
+        with patch('resources.lib.audio_intro.xbmcvfs.File', return_value=FakeStrmFile()), \
+                patch('resources.lib.audio_intro.subprocess.run', side_effect=ffprobe_error), \
+                patch('resources.lib.audio_intro.xbmc.log') as log_mock:
+            self.assertIsNone(detector._probe_duration('/media/Show.S01E01.strm'))
+
+        message = log_mock.call_args[0][0]
+        self.assertNotIn(stream_url, message)
+        self.assertIn('ffprobe timed out', message)
 
 
 class TestMetadataFilenameEdgeCases(unittest.TestCase):
@@ -1209,6 +1331,27 @@ class TestContextModule(unittest.TestCase):
         self.assertEqual(result['intro_end_time'], 263)
         self.assertEqual(result['source'], 'audio_detection')
         dialog.yesno.assert_called_once()
+
+    def test_get_audio_intro_detection_includes_outro(self):
+        import context
+
+        dialog = MagicMock()
+        dialog.yesno.return_value = True
+        fake_detector = MagicMock()
+        fake_detector.find_episode_candidates.return_value = ['e1.mkv', 'e2.mkv']
+        fake_detector.detect_show_intro.return_value = {
+            'intro_start_time': 0,
+            'intro_end_time': 180,
+            'outro_start_time': 2400,
+            'episode_count': 2,
+            'matching_episode_count': 2,
+        }
+
+        with patch.object(context, 'AudioIntroDetector', return_value=fake_detector):
+            result = context.get_audio_intro_detection(dialog, {'file': '/videos/e1.mkv'})
+
+        self.assertEqual(result['outro_start_time'], 2400)
+        self.assertIn('outro', dialog.yesno.call_args[0][1])
 
 
 class TestDatabaseMigration(unittest.TestCase):
