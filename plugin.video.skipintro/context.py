@@ -5,10 +5,259 @@ import xbmcaddon
 import xbmcvfs
 import json
 import os
+import re
+from urllib.parse import parse_qs, unquote_plus, urlparse
 from resources.lib.database import ShowDatabase
 from resources.lib.metadata import ShowMetadata
 from resources.lib.chapters import ChapterManager
 from resources.lib.audio_intro import AudioIntroDetectionError, AudioIntroDetector
+
+
+FENLIGHT_PLUGIN = 'plugin.video.fenlight'
+ARABIC_NORMALIZE_MAP = {
+    ord('\u0622'): '\u0627',
+    ord('\u0623'): '\u0627',
+    ord('\u0625'): '\u0627',
+    ord('\u0671'): '\u0627',
+    ord('\u0649'): '\u064a',
+    ord('\u0624'): '\u0648',
+    ord('\u0626'): '\u064a',
+}
+
+
+def _json_rpc(method, params=None):
+    """Call Kodi JSON-RPC and return the result object."""
+    try:
+        payload = {'jsonrpc': '2.0', 'id': 1, 'method': method}
+        if params is not None:
+            payload['params'] = params
+        raw = xbmc.executeJSONRPC(json.dumps(payload))
+        response = json.loads(raw or '{}')
+        if response.get('error'):
+            xbmc.log(f'SkipIntro: JSON-RPC {method} failed: {response["error"]}', xbmc.LOGWARNING)
+            return None
+        return response.get('result')
+    except Exception as e:
+        xbmc.log(f'SkipIntro: JSON-RPC {method} error: {str(e)}', xbmc.LOGWARNING)
+        return None
+
+
+def _first_query_value(values, key):
+    value = values.get(key)
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def _parse_plugin_path(path):
+    """Return decoded plugin query values for supported plugin paths."""
+    if not path:
+        return None
+    try:
+        parsed = urlparse(path)
+    except Exception:
+        return None
+    if parsed.scheme != 'plugin' or parsed.netloc != FENLIGHT_PLUGIN:
+        return None
+
+    query = {}
+    for key, values in parse_qs(parsed.query, keep_blank_values=True).items():
+        query[key] = unquote_plus(values[0]) if values else ''
+    return query
+
+
+def _is_plugin_path(path):
+    try:
+        return urlparse(path or '').scheme == 'plugin'
+    except Exception:
+        return False
+
+
+def _safe_int(value):
+    try:
+        if value is None or value == '':
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_title(value):
+    """Normalize English/Arabic titles enough for local library matching."""
+    value = unquote_plus(str(value or '')).strip().lower()
+    value = value.translate(ARABIC_NORMALIZE_MAP)
+    value = re.sub(r'[\u064b-\u065f\u0670]', '', value)
+    value = re.sub(r'[^\w\u0600-\u06ff]+', ' ', value, flags=re.UNICODE)
+    return ' '.join(value.split())
+
+
+def _selected_item_labels():
+    labels = []
+    for label in (
+        'ListItem.TVShowTitle',
+        'ListItem.Title',
+        'ListItem.Label',
+        'ListItem.OriginalTitle',
+    ):
+        value = xbmc.getInfoLabel(label)
+        if value and value not in labels:
+            labels.append(value)
+    return labels
+
+
+def _tmdb_id_from_uniqueid(uniqueid):
+    if isinstance(uniqueid, dict):
+        for key in ('tmdb', 'tmdb_id', 'themoviedb'):
+            value = uniqueid.get(key)
+            if value:
+                return str(value)
+    elif uniqueid:
+        return str(uniqueid)
+    return None
+
+
+def _get_library_tvshows():
+    result = _json_rpc('VideoLibrary.GetTVShows', {
+        'properties': ['title', 'uniqueid', 'file', 'year'],
+        'limits': {'start': 0, 'end': 10000}
+    })
+    if not result:
+        return []
+    return result.get('tvshows') or []
+
+
+def _get_tvshow_details(tvshow_id):
+    result = _json_rpc('VideoLibrary.GetTVShowDetails', {
+        'tvshowid': tvshow_id,
+        'properties': ['title', 'uniqueid', 'file', 'year']
+    })
+    if not result:
+        return None
+    return result.get('tvshowdetails')
+
+
+def _find_local_tvshow(plugin_query, labels):
+    """Find a local Kodi library show for a Fen Light plugin item."""
+    tmdb_id = _first_query_value(plugin_query, 'tmdb_id')
+    title_candidates = [value for value in labels if value]
+    plugin_name = _first_query_value(plugin_query, 'name')
+    if plugin_name:
+        title_candidates.append(plugin_name)
+
+    tvshows = _get_library_tvshows()
+    if tmdb_id:
+        for show in tvshows:
+            if _tmdb_id_from_uniqueid(show.get('uniqueid')) == str(tmdb_id):
+                return _get_tvshow_details(show.get('tvshowid')) or show
+
+    normalized_titles = [_normalize_title(title) for title in title_candidates]
+    normalized_titles = [title for title in normalized_titles if title]
+    if not normalized_titles:
+        return None
+
+    for show in tvshows:
+        show_title = _normalize_title(show.get('title') or show.get('label'))
+        if show_title and show_title in normalized_titles:
+            return _get_tvshow_details(show.get('tvshowid')) or show
+
+    for show in tvshows:
+        show_title = _normalize_title(show.get('title') or show.get('label'))
+        if not show_title:
+            continue
+        for title in normalized_titles:
+            if len(title) >= 4 and (title in show_title or show_title in title):
+                return _get_tvshow_details(show.get('tvshowid')) or show
+
+    return None
+
+
+def _get_local_episodes(tvshow_id):
+    if tvshow_id is None:
+        return []
+    result = _json_rpc('VideoLibrary.GetEpisodes', {
+        'tvshowid': tvshow_id,
+        'properties': ['title', 'season', 'episode', 'file'],
+        'sort': {'method': 'episode'}
+    })
+    if not result:
+        return []
+    episodes = result.get('episodes') or []
+    return sorted(episodes, key=lambda item: (item.get('season') or 0, item.get('episode') or 0))
+
+
+def _get_local_episode_file(tvshow_id, season, episode):
+    if tvshow_id is None or season is None or episode is None:
+        return None
+    for local_episode in _get_local_episodes(tvshow_id):
+        if local_episode.get('season') == season and local_episode.get('episode') == episode:
+            return local_episode.get('file')
+    return None
+
+
+def _resolve_plugin_item_to_local(path, labels):
+    """Resolve a Fen Light show/episode route to a local library path."""
+    plugin_query = _parse_plugin_path(path)
+    if not plugin_query:
+        return None
+
+    local_show = _find_local_tvshow(plugin_query, labels)
+    if not local_show:
+        return None
+
+    show_title = local_show.get('title') or local_show.get('label') or (labels[0] if labels else None)
+    tvshow_id = local_show.get('tvshowid')
+    season = _safe_int(_first_query_value(plugin_query, 'season'))
+    episode = _safe_int(_first_query_value(plugin_query, 'episode'))
+    media_type = _first_query_value(plugin_query, 'media_type')
+
+    if media_type == 'episode' and season is not None and episode is not None:
+        episode_file = _get_local_episode_file(tvshow_id, season, episode)
+        if episode_file:
+            xbmc.log(
+                f'SkipIntro: Resolved Fen Light episode to local library file for {show_title} S{season}E{episode}',
+                xbmc.LOGINFO
+            )
+            return {
+                'showtitle': show_title,
+                'season': season,
+                'episode': episode,
+                'file': episode_file,
+                'resolved_from_plugin': True
+            }
+
+    local_episodes = _get_local_episodes(tvshow_id)
+    for local_episode in local_episodes:
+        episode_file = local_episode.get('file')
+        if episode_file:
+            local_season = local_episode.get('season')
+            local_episode_number = local_episode.get('episode')
+            xbmc.log(
+                f'SkipIntro: Resolved Fen Light show to local library episode seed for {show_title} '
+                f'S{local_season}E{local_episode_number}',
+                xbmc.LOGINFO
+            )
+            return {
+                'showtitle': show_title,
+                'season': local_season,
+                'episode': local_episode_number,
+                'file': episode_file,
+                'resolved_from_plugin': True,
+                'save_episode_times': False
+            }
+
+    show_folder = local_show.get('file')
+    if show_folder:
+        xbmc.log(f'SkipIntro: Resolved Fen Light show to local library folder fallback for {show_title}', xbmc.LOGINFO)
+        return {
+            'showtitle': show_title,
+            'season': None,
+            'episode': None,
+            'file': show_folder,
+            'resolved_from_plugin': True,
+            'save_episode_times': False
+        }
+
+    return None
 
 def get_selected_item_info():
     """Get info about the selected item in Kodi"""
@@ -20,6 +269,21 @@ def get_selected_item_info():
         season = xbmc.getInfoLabel('ListItem.Season')
         episode = xbmc.getInfoLabel('ListItem.Episode')
         filepath = xbmc.getInfoLabel('ListItem.FileNameAndPath')
+        labels = _selected_item_labels()
+
+        resolved_plugin_item = _resolve_plugin_item_to_local(filepath, labels)
+        if resolved_plugin_item:
+            return resolved_plugin_item
+        if _parse_plugin_path(filepath):
+            xbmc.log('SkipIntro: Fen Light item has no matching local Kodi library show', xbmc.LOGWARNING)
+            return {
+                'error': 'No matching local Kodi library show found for this Fen Light item'
+            }
+        if _is_plugin_path(filepath):
+            xbmc.log('SkipIntro: Unsupported plugin item selected for audio detection', xbmc.LOGWARNING)
+            return {
+                'error': 'Select a local Kodi library episode/show, or a Fen Light item that exists in the local library'
+            }
 
         # If we have all info from library (DBType), use it
         if showtitle and season and episode and filepath:
@@ -383,13 +647,20 @@ def save_user_times():
     xbmc.log('SkipIntro: Starting manual time input', xbmc.LOGINFO)
 
     item = get_selected_item_info()
+    if item and item.get('error'):
+        xbmc.log(f'SkipIntro: Selected item error: {item["error"]}', xbmc.LOGWARNING)
+        xbmcgui.Dialog().notification('Skip Intro', item['error'], xbmcgui.NOTIFICATION_ERROR)
+        return
     if not item:
         xbmc.log('SkipIntro: No item selected', xbmc.LOGERROR)
         xbmcgui.Dialog().notification('Skip Intro', 'No item selected', xbmcgui.NOTIFICATION_ERROR)
         return
 
     from resources.lib.metadata import sanitize_path
-    xbmc.log(f'SkipIntro: Selected item: {item["showtitle"]} S{item["season"]}E{item["episode"]}', xbmc.LOGINFO)
+    if item.get('season') is not None and item.get('episode') is not None:
+        xbmc.log(f'SkipIntro: Selected item: {item["showtitle"]} S{item["season"]}E{item["episode"]}', xbmc.LOGINFO)
+    else:
+        xbmc.log(f'SkipIntro: Selected item: {item["showtitle"]} local show folder', xbmc.LOGINFO)
 
     # Initialize database
     xbmc.log('SkipIntro: Initializing database', xbmc.LOGINFO)
@@ -454,7 +725,12 @@ def save_user_times():
             )
 
         if success:
-            if times.get('source') == 'audio_detection':
+            if (
+                times.get('source') == 'audio_detection' and
+                item.get('season') is not None and
+                item.get('episode') is not None and
+                item.get('save_episode_times', True)
+            ):
                 db.save_episode_times(
                     show_id,
                     item.get('season'),

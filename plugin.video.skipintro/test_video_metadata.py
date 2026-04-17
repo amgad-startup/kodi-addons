@@ -1353,6 +1353,127 @@ class TestContextModule(unittest.TestCase):
         self.assertEqual(result['outro_start_time'], 2400)
         self.assertIn('outro', dialog.yesno.call_args[0][1])
 
+    def test_resolve_fenlight_episode_to_local_episode_by_tmdb(self):
+        import context
+
+        path = 'plugin://plugin.video.fenlight/?mode=playback.media&media_type=episode&tmdb_id=86325&season=1&episode=2'
+        tvshows = {
+            'tvshows': [
+                {
+                    'tvshowid': 7,
+                    'title': 'بوابة الحلواني',
+                    'uniqueid': {'tmdb': '86325'},
+                    'file': 'smb://server/بوابة الحلواني/'
+                }
+            ]
+        }
+        episodes = {
+            'episodes': [
+                {'season': 1, 'episode': 1, 'file': 'smb://server/show/S01E01.strm'},
+                {'season': 1, 'episode': 2, 'file': 'smb://server/show/S01E02.strm'},
+            ]
+        }
+
+        with patch.object(context, '_json_rpc', side_effect=[tvshows, tvshows['tvshows'][0], episodes]):
+            result = context._resolve_plugin_item_to_local(path, [])
+
+        self.assertEqual(result['showtitle'], 'بوابة الحلواني')
+        self.assertEqual(result['season'], 1)
+        self.assertEqual(result['episode'], 2)
+        self.assertEqual(result['file'], 'smb://server/show/S01E02.strm')
+
+    def test_resolve_fenlight_show_to_local_episode_seed_by_normalized_title(self):
+        import context
+
+        path = 'plugin://plugin.video.fenlight/?mode=extras_menu_choice&tmdb_id=110491&media_type=tvshow'
+        tvshows = {
+            'tvshows': [
+                {
+                    'tvshowid': 8,
+                    'title': 'لن أعيش فى جلباب أبي',
+                    'file': 'smb://server/لن أعيش فى جلباب أبي/'
+                }
+            ]
+        }
+        episodes = {
+            'episodes': [
+                {'season': 1, 'episode': 1, 'file': 'smb://server/show/Season 01/S01E01.strm'},
+                {'season': 1, 'episode': 2, 'file': 'smb://server/show/Season 01/S01E02.strm'},
+            ]
+        }
+
+        with patch.object(context, '_json_rpc', side_effect=[tvshows, tvshows['tvshows'][0], episodes]):
+            result = context._resolve_plugin_item_to_local(path, ['لن اعيش في جلباب ابي'])
+
+        self.assertEqual(result['showtitle'], 'لن أعيش فى جلباب أبي')
+        self.assertEqual(result['season'], 1)
+        self.assertEqual(result['episode'], 1)
+        self.assertFalse(result['save_episode_times'])
+        self.assertEqual(result['file'], 'smb://server/show/Season 01/S01E01.strm')
+
+    def test_get_selected_item_info_rejects_unmapped_fenlight_item(self):
+        import context
+
+        def info_label(label):
+            if label == 'ListItem.FileNameAndPath':
+                return 'plugin://plugin.video.fenlight/?mode=extras_menu_choice&tmdb_id=122543&media_type=tvshow'
+            return ''
+
+        with patch.object(context.xbmc, 'getInfoLabel', side_effect=info_label), \
+             patch.object(context, '_json_rpc', return_value={'tvshows': []}):
+            result = context.get_selected_item_info()
+
+        self.assertEqual(
+            result['error'],
+            'No matching local Kodi library show found for this Fen Light item'
+        )
+
+    def test_get_selected_item_info_rejects_unsupported_plugin_item(self):
+        import context
+
+        def info_label(label):
+            if label == 'ListItem.FileNameAndPath':
+                return 'plugin://plugin.video.other/?mode=show&id=1'
+            return ''
+
+        with patch.object(context.xbmc, 'getInfoLabel', side_effect=info_label):
+            result = context.get_selected_item_info()
+
+        self.assertIn('local Kodi library', result['error'])
+
+    def test_save_user_times_skips_episode_save_for_show_folder_audio_detection(self):
+        import context
+
+        fake_db = MagicMock()
+        fake_db.get_show.return_value = 123
+        fake_db.set_manual_show_times.return_value = True
+        fake_db.get_show_config.return_value = {
+            'intro_start_time': 0,
+            'intro_end_time': 120,
+            'outro_start_time': None
+        }
+
+        item = {
+            'showtitle': 'Local Show',
+            'season': None,
+            'episode': None,
+            'file': 'smb://server/Local Show/'
+        }
+        times = {
+            'intro_start_time': 0,
+            'intro_end_time': 120,
+            'outro_start_time': None,
+            'source': 'audio_detection'
+        }
+
+        with patch.object(context, 'get_selected_item_info', return_value=item), \
+             patch.object(context, 'ShowDatabase', return_value=fake_db), \
+             patch.object(context, 'get_manual_times', return_value=times):
+            context.save_user_times()
+
+        fake_db.set_manual_show_times.assert_called_once_with(123, 0, 120, None)
+        fake_db.save_episode_times.assert_not_called()
+
 
 class TestDatabaseMigration(unittest.TestCase):
     """Tests for database schema creation and migration"""
