@@ -10,7 +10,7 @@ import xbmcvfs
 from resources.lib.metadata import sanitize_path
 
 
-VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov', '.m4v', '.webm', '.ts')
+VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov', '.m4v', '.webm', '.ts', '.strm')
 SPEECH_LABELS = {'speech', 'male', 'female'}
 MUSIC_LABELS = {'music'}
 SILENCE_LABELS = {'noise', 'noenergy', 'silence'}
@@ -209,6 +209,7 @@ class AudioIntroDetector:
             self._segmenter = self._segmenter_factory()
             return self._segmenter
 
+        self._patch_numpy_for_inaspeechsegmenter()
         try:
             from inaSpeechSegmenter import Segmenter
         except Exception as e:
@@ -220,11 +221,50 @@ class AudioIntroDetector:
         self._segmenter = Segmenter(vad_engine='smn', detect_gender=False)
         return self._segmenter
 
+    @staticmethod
+    def _patch_numpy_for_inaspeechsegmenter():
+        """Keep older inaSpeechSegmenter/pyannote code running on modern NumPy."""
+        # Compatibility shim for offline venv testing; inaSpeechSegmenter is
+        # too heavy for Kodi's embedded Python in normal addon usage.
+        try:
+            import numpy as np
+        except Exception:
+            return
+
+        if not hasattr(np.lib, 'pad') and hasattr(np, 'pad'):
+            np.lib.pad = np.pad
+
+        if getattr(np, '_skipintro_stack_sequence_patch', False):
+            return
+
+        original_stack = np.stack
+        original_vstack = np.vstack
+        original_hstack = np.hstack
+
+        def coerce_sequence(values):
+            if isinstance(values, (list, tuple)):
+                return values
+            return list(values)
+
+        def stack(values, *args, **kwargs):
+            return original_stack(coerce_sequence(values), *args, **kwargs)
+
+        def vstack(values, *args, **kwargs):
+            return original_vstack(coerce_sequence(values), *args, **kwargs)
+
+        def hstack(values, *args, **kwargs):
+            return original_hstack(coerce_sequence(values), *args, **kwargs)
+
+        np.stack = stack
+        np.vstack = vstack
+        np.hstack = hstack
+        np._skipintro_stack_sequence_patch = True
+
     def _extract_audio_clip(self, video_path: str, ffmpeg: str) -> str:
         fd, output_path = tempfile.mkstemp(prefix='skipintro-audio-', suffix='.wav')
         os.close(fd)
 
-        input_path = self._to_native_path(video_path)
+        input_path = self._resolve_input_path(video_path)
         command = [
             ffmpeg,
             '-y',
@@ -247,6 +287,8 @@ class AudioIntroDetector:
             except OSError:
                 pass
             error = e.stderr.decode('utf-8', errors='replace').strip()
+            if input_path:
+                error = error.replace(input_path, '[input]')
             raise AudioIntroDetectionError(
                 f'ffmpeg could not extract audio from {sanitize_path(video_path)}: {error}'
             ) from e
@@ -307,13 +349,55 @@ class AudioIntroDetector:
     def _is_silence(label: str) -> bool:
         return label.lower() in SILENCE_LABELS
 
+    def _resolve_input_path(self, path: str) -> str:
+        native_path = self._to_native_path(path)
+        if self._is_strm_path(path) or self._is_strm_path(native_path):
+            stream_path = self._read_strm_target(native_path)
+            if not stream_path:
+                raise AudioIntroDetectionError(f'No playable stream URL found in {sanitize_path(path)}')
+            xbmc.log('SkipIntro: Resolved .strm episode for audio intro detection', xbmc.LOGDEBUG)
+            return stream_path
+
+        if native_path.startswith(('smb://', 'nfs://')):
+            xbmc.log('SkipIntro: Network path may not be supported by ffmpeg audio detection', xbmc.LOGWARNING)
+
+        return native_path
+
     @staticmethod
     def _to_native_path(path: str) -> str:
         if path.startswith('special://'):
             return xbmcvfs.translatePath(path)
-        if path.startswith(('smb://', 'nfs://')):
-            xbmc.log('SkipIntro: Network path may not be supported by ffmpeg audio detection', xbmc.LOGWARNING)
         return path
+
+    @staticmethod
+    def _is_strm_path(path: str) -> bool:
+        return path.lower().endswith('.strm')
+
+    @staticmethod
+    def _read_strm_target(path: str) -> Optional[str]:
+        handle = None
+        try:
+            handle = xbmcvfs.File(path)
+            content = handle.read()
+        except Exception as e:
+            raise AudioIntroDetectionError(f'Could not read .strm file {sanitize_path(path)}: {str(e)}') from e
+        finally:
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+
+        if isinstance(content, bytes):
+            content = content.decode('utf-8', errors='replace')
+        else:
+            content = str(content or '')
+
+        for line in content.splitlines():
+            line = line.lstrip('\ufeff').strip()
+            if line and not line.startswith('#'):
+                return line
+        return None
 
     @staticmethod
     def _split_path(path: str) -> Tuple[str, str]:

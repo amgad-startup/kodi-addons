@@ -2,6 +2,7 @@ import unittest
 import tempfile
 import os
 import json
+import subprocess
 import warnings
 from unittest.mock import MagicMock, patch
 
@@ -864,6 +865,20 @@ class TestAudioIntroDetector(unittest.TestCase):
         self.assertTrue(result[0].endswith('Show.S01E02.mkv'))
         self.assertTrue(result[1].endswith('Show.S01E03.mkv'))
 
+    def test_find_episode_candidates_includes_strm_files(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name in ['Show.S01E01.strm', 'Show.S01E02.strm', 'notes.txt']:
+                open(os.path.join(tmpdir, name), 'w').close()
+
+            selected = os.path.join(tmpdir, 'Show.S01E01.strm')
+            detector = AudioIntroDetector(max_episodes=2)
+            result = detector.find_episode_candidates(selected)
+
+        self.assertEqual(len(result), 2)
+        self.assertTrue(result[0].endswith('Show.S01E01.strm'))
+        self.assertTrue(result[1].endswith('Show.S01E02.strm'))
+
     def test_find_episode_candidates_accepts_show_folder(self):
         from resources.lib.audio_intro import AudioIntroDetector
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -876,6 +891,57 @@ class TestAudioIntroDetector(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertTrue(result[0].endswith('Show.S01E01.mkv'))
         self.assertTrue(result[1].endswith('Show.S01E02.mkv'))
+
+    def test_extract_audio_clip_resolves_strm_url(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        stream_url = 'https://stream.example.test/private-token/episode.m3u8'
+
+        class FakeStrmFile:
+            def read(self):
+                return '#EXTM3U\n' + stream_url + '\n'
+            def close(self):
+                pass
+
+        detector = AudioIntroDetector(max_scan_seconds=600)
+        with patch('resources.lib.audio_intro.xbmcvfs.File', return_value=FakeStrmFile()), \
+                patch('resources.lib.audio_intro.subprocess.run') as run_mock:
+            output_path = detector._extract_audio_clip('/media/Show.S01E01.strm', 'ffmpeg')
+
+        try:
+            run_mock.assert_called_once()
+            self.assertTrue(run_mock.call_args.kwargs.get('check'))
+            command = run_mock.call_args[0][0]
+            self.assertIn(stream_url, command)
+            self.assertIn('-t', command)
+            self.assertIn('600', command)
+        finally:
+            os.unlink(output_path)
+
+    def test_extract_audio_clip_redacts_strm_url_on_ffmpeg_error(self):
+        from resources.lib.audio_intro import AudioIntroDetectionError, AudioIntroDetector
+
+        stream_url = 'https://stream.example.test/private-token/episode.m3u8'
+
+        class FakeStrmFile:
+            def read(self):
+                return stream_url
+            def close(self):
+                pass
+
+        detector = AudioIntroDetector()
+        ffmpeg_error = subprocess.CalledProcessError(
+            1,
+            ['ffmpeg'],
+            stderr=f'{stream_url}: Server returned 403 Forbidden'.encode('utf-8')
+        )
+        with patch('resources.lib.audio_intro.xbmcvfs.File', return_value=FakeStrmFile()), \
+                patch('resources.lib.audio_intro.subprocess.run', side_effect=ffmpeg_error):
+            with self.assertRaises(AudioIntroDetectionError) as ctx:
+                detector._extract_audio_clip('/media/Show.S01E01.strm', 'ffmpeg')
+
+        self.assertNotIn(stream_url, str(ctx.exception))
+        self.assertIn('[input]', str(ctx.exception))
 
 
 class TestMetadataFilenameEdgeCases(unittest.TestCase):
