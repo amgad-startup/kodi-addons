@@ -1339,6 +1339,29 @@ class TestMetadataFilenameEdgeCases(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result['season'], 1)
 
+    def test_parse_url_strips_query_tokens(self):
+        """URL query tokens are ignored when parsing filenames"""
+        result = self.metadata._parse_filename('https://stream.example/Show.S01E01.m3u8?token=secret')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['title'].strip(), 'Show')
+        self.assertEqual(result['season'], 1)
+
+    def test_sanitize_path_redacts_credentials_and_tokens(self):
+        """sanitize_path removes credentials, query strings, and fragments"""
+        from resources.lib.metadata import sanitize_path, safe_basename
+        self.assertEqual(
+            sanitize_path('smb://user:pass@example.test/share/Show.S01E01.mkv?token=abc#frag'),
+            'smb://***:***@example.test/share/Show.S01E01.mkv'
+        )
+        self.assertEqual(
+            sanitize_path('plugin://plugin.video.fenlight/?tmdb_id=123&token=secret'),
+            'plugin://plugin.video.fenlight/'
+        )
+        self.assertEqual(
+            safe_basename('https://stream.example/path/Show.S01E01.m3u8?token=secret'),
+            'Show.S01E01.m3u8'
+        )
+
 
 class TestPlayerUI(unittest.TestCase):
     """Tests for PlayerUI and SkipIntroDialog"""
@@ -1467,6 +1490,17 @@ class TestContextModule(unittest.TestCase):
         dialog.yesno.return_value = False
         result = get_manual_time_input(dialog, None)
         self.assertEqual(result['intro_start_time'], 90)
+        self.assertEqual(result['intro_end_time'], 180)
+        self.assertIsNone(result['outro_start_time'])
+
+    def test_get_manual_time_input_empty_start_defaults_to_zero(self):
+        """Empty optional intro start means video start, not cancellation"""
+        from context import get_manual_time_input
+        dialog = MagicMock()
+        dialog.numeric.side_effect = ['', '03:00', '']  # no start, end, no outro
+        dialog.yesno.return_value = False
+        result = get_manual_time_input(dialog, None)
+        self.assertEqual(result['intro_start_time'], 0)
         self.assertEqual(result['intro_end_time'], 180)
         self.assertIsNone(result['outro_start_time'])
 
@@ -1639,6 +1673,187 @@ class TestContextModule(unittest.TestCase):
 class TestDatabaseManager(unittest.TestCase):
     """Tests for database management import/export behavior"""
 
+    def test_vfs_join_preserves_kodi_url_paths(self):
+        from resources.lib.database_manager import DatabaseManager
+        self.assertEqual(
+            DatabaseManager._vfs_join('smb://server/share/folder/', 'backup.db'),
+            'smb://server/share/folder/backup.db'
+        )
+        self.assertEqual(
+            DatabaseManager._vfs_join('nfs://server/share/folder', '/backup.db'),
+            'nfs://server/share/folder/backup.db'
+        )
+        self.assertEqual(
+            DatabaseManager._vfs_join('special://userdata/addon_data/plugin.video.skipintro/', 'export.json'),
+            'special://userdata/addon_data/plugin.video.skipintro/export.json'
+        )
+
+    def test_vfs_join_treats_second_argument_as_safe_filename(self):
+        """Backup/export filenames cannot traverse outside the configured directory"""
+        from resources.lib.database_manager import DatabaseManager
+        self.assertEqual(
+            DatabaseManager._vfs_join('smb://server/share/folder', '../escape.db'),
+            'smb://server/share/folder/escape.db'
+        )
+        self.assertEqual(
+            DatabaseManager._vfs_join('/tmp/skipintro', '..\\escape.db'),
+            os.path.join('/tmp/skipintro', 'escape.db')
+        )
+
+    def test_vfs_join_uses_native_join_for_local_paths(self):
+        from resources.lib.database_manager import DatabaseManager
+        self.assertEqual(
+            DatabaseManager._vfs_join('/tmp/skipintro', 'backup.db'),
+            os.path.join('/tmp/skipintro', 'backup.db')
+        )
+
+    def test_backup_restore_path_uses_url_separator_for_vfs_paths(self):
+        from resources.lib.database_manager import DatabaseManager
+        mgr = DatabaseManager.__new__(DatabaseManager)
+        mgr.addon = MockXBMCAddon.Addon()
+        mgr.addon.setSetting('backup_restore_path', 'smb://server/share/backups')
+        mgr.addon_data_path = 'special://userdata/addon_data/plugin.video.skipintro/'
+
+        with patch('resources.lib.database_manager.xbmcvfs.translatePath', side_effect=lambda p: p):
+            self.assertEqual(
+                mgr._get_backup_restore_path(),
+                'smb://server/share/backups/'
+            )
+
+    def test_validate_import_config_rejects_unsafe_values(self):
+        from resources.lib.database_manager import DatabaseManager
+        clean = DatabaseManager._validate_import_config({
+            'intro_start_chapter': -1,
+            'intro_end_chapter': 10000,
+            'outro_start_chapter': 5,
+            'intro_start_time': -0.1,
+            'intro_end_time': 86401,
+            'outro_start_time': 3600,
+            'intro_duration': 90,
+            'use_chapters': True,
+            'config_created_at': '2026-04-17 10:00:00',
+        })
+
+        self.assertIsNone(clean['intro_start_chapter'])
+        self.assertIsNone(clean['intro_end_chapter'])
+        self.assertEqual(clean['outro_start_chapter'], 5)
+        self.assertIsNone(clean['intro_start_time'])
+        self.assertIsNone(clean['intro_end_time'])
+        self.assertEqual(clean['outro_start_time'], 3600)
+        self.assertEqual(clean['intro_duration'], 90)
+        self.assertTrue(clean['use_chapters'])
+
+    def test_validate_import_config_rejects_bool_as_numeric_value(self):
+        from resources.lib.database_manager import DatabaseManager
+        clean = DatabaseManager._validate_import_config({
+            'intro_start_chapter': True,
+            'intro_end_time': False,
+            'intro_duration': True,
+        })
+        self.assertIsNone(clean['intro_start_chapter'])
+        self.assertIsNone(clean['intro_end_time'])
+        self.assertIsNone(clean['intro_duration'])
+
+    def test_validate_import_episode_rejects_invalid_identity(self):
+        from resources.lib.database_manager import DatabaseManager
+        self.assertIsNone(DatabaseManager._validate_import_episode({
+            'season': -1,
+            'episode': 1,
+            'intro_end_time': 90,
+        }))
+        self.assertIsNone(DatabaseManager._validate_import_episode({
+            'season': 1,
+            'episode': 10001,
+            'intro_end_time': 90,
+        }))
+
+    def test_export_to_json_uses_vfs_file_and_redacts_logs(self):
+        from resources.lib.database import ShowDatabase
+        from resources.lib.database_manager import DatabaseManager
+
+        tmp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        tmp.close()
+        db = ShowDatabase(tmp.name)
+        try:
+            show_id = db.get_show('Export Show')
+            db.set_manual_show_times(show_id, 0, 75, 1200)
+            db.save_episode_times(show_id, 1, 2, {
+                'intro_start_time': 0,
+                'intro_end_time': 75,
+                'source': 'test'
+            })
+        finally:
+            db.close()
+
+        writes = {}
+
+        class FakeFile:
+            def __init__(self, path, mode):
+                writes['path'] = path
+                writes['mode'] = mode
+                writes['content'] = ''
+
+            def write(self, data):
+                writes['content'] += data
+
+            def close(self):
+                writes['closed'] = True
+
+        mgr = DatabaseManager.__new__(DatabaseManager)
+        mgr.addon = MockXBMCAddon.Addon()
+        mgr.addon.setSetting(
+            'backup_restore_path',
+            'smb://user:pass@server/share/backups?token=secret'
+        )
+        mgr.addon_data_path = 'special://userdata/addon_data/plugin.video.skipintro/'
+        mgr.db_path = tmp.name
+
+        try:
+            with patch('resources.lib.database_manager.xbmcvfs.File', side_effect=FakeFile), \
+                    patch('resources.lib.database_manager.xbmcvfs.translatePath', side_effect=lambda p: p), \
+                    patch('resources.lib.database_manager.xbmc.log') as log_mock:
+                self.assertTrue(mgr.export_to_json())
+        finally:
+            os.unlink(tmp.name)
+
+        self.assertEqual(writes['mode'], 'w')
+        self.assertTrue(writes['path'].startswith('smb://user:pass@server/share/backups/'))
+        data = json.loads(writes['content'])
+        self.assertEqual(data['shows_count'], 1)
+        self.assertEqual(data['shows'][0]['title'], 'Export Show')
+        logs = '\n'.join(str(call.args[0]) for call in log_mock.call_args_list)
+        self.assertNotIn('user:pass', logs)
+        self.assertNotIn('token=secret', logs)
+        self.assertIn('***:***@server', logs)
+
+    def test_import_from_json_rejects_oversized_file_before_reading(self):
+        from resources.lib.database_manager import DatabaseManager
+
+        class BigFile:
+            def size(self):
+                return 10 * 1024 * 1024 + 1
+
+            def read(self):
+                raise AssertionError('oversized imports should not be read')
+
+            def close(self):
+                pass
+
+        dialog = MagicMock()
+        dialog.browse.return_value = 'smb://server/share/huge.json'
+        mgr = DatabaseManager.__new__(DatabaseManager)
+        mgr.addon = MockXBMCAddon.Addon()
+        mgr.addon.setSetting('backup_restore_path', 'special://userdata/addon_data/plugin.video.skipintro/')
+        mgr.addon_data_path = 'special://userdata/addon_data/plugin.video.skipintro/'
+        mgr.db_path = ':memory:'
+
+        with patch('resources.lib.database_manager.xbmcvfs.File', return_value=BigFile()), \
+                patch('resources.lib.database_manager.xbmcvfs.translatePath', side_effect=lambda p: p), \
+                patch('resources.lib.database_manager.xbmcgui.Dialog', return_value=dialog):
+            self.assertFalse(mgr.import_from_json())
+
+        dialog.notification.assert_called()
+
     def test_import_from_json_preserves_chapter_outro_columns(self):
         from resources.lib.database import ShowDatabase
         from resources.lib.database_manager import DatabaseManager
@@ -1807,6 +2022,66 @@ class TestDatabaseMigration(unittest.TestCase):
         self.assertEqual(config['intro_start_chapter'], 1)
         self.assertIsNone(config['intro_end_chapter'])
         self.assertEqual(config['intro_duration'], 90)
+
+    def test_show_title_is_parameterized_not_sql(self):
+        """Show titles containing SQL syntax are stored as data"""
+        malicious = "Robert'); DROP TABLE shows;--"
+        show_id = self.db.get_show(malicious)
+        self.assertIsNotNone(show_id)
+
+        import sqlite3
+        conn = sqlite3.connect(self.tmp.name)
+        try:
+            c = conn.cursor()
+            c.execute("SELECT title FROM shows WHERE id = ?", (show_id,))
+            self.assertEqual(c.fetchone()[0], malicious)
+            c.execute("SELECT COUNT(*) FROM shows")
+            self.assertGreaterEqual(c.fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_legacy_database_gets_missing_columns(self):
+        """Migration adds modern columns without dropping legacy rows"""
+        import sqlite3
+        legacy = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        legacy.close()
+        conn = sqlite3.connect(legacy.name)
+        try:
+            c = conn.cursor()
+            c.execute('CREATE TABLE shows (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)')
+            c.execute('CREATE TABLE shows_config (show_id INTEGER PRIMARY KEY, use_chapters BOOLEAN DEFAULT 0)')
+            c.execute('INSERT INTO shows (title) VALUES (?)', ('Legacy Show',))
+            conn.commit()
+        finally:
+            conn.close()
+
+        from resources.lib.database import ShowDatabase
+        db = ShowDatabase(legacy.name)
+        try:
+            conn = sqlite3.connect(legacy.name)
+            try:
+                c = conn.cursor()
+                c.execute("PRAGMA table_info(shows_config)")
+                columns = {row[1] for row in c.fetchall()}
+            finally:
+                conn.close()
+            self.assertIn('intro_end_time', columns)
+            self.assertEqual(db.get_show('Legacy Show'), 1)
+        finally:
+            db.close()
+            os.unlink(legacy.name)
+
+    def test_invalid_table_name_is_rejected_by_migration_helper(self):
+        """Dynamic migration helpers reject table names outside the allowlist"""
+        import sqlite3
+        conn = sqlite3.connect(':memory:')
+        try:
+            c = conn.cursor()
+            self.db._migrate_table(c, 'shows; DROP TABLE shows', {'id': 'INTEGER'})
+            c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            self.assertEqual(c.fetchall(), [])
+        finally:
+            conn.close()
 
 
 class TestShowManager(unittest.TestCase):

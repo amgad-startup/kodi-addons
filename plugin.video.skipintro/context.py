@@ -422,8 +422,6 @@ def get_manual_time_input(dialog, config):
 
     # Get times using the helper function with defaults
     intro_start = get_time_input(dialog, 'When does intro START? (MM:SS, or empty for video start)', default_intro_start, required=False)
-    if intro_start is None:
-        return None
 
     intro_end = get_time_input(dialog, 'When does intro END? (MM:SS, e.g. 01:30)', default_intro_end, required=True)
     if intro_end is None:
@@ -442,7 +440,7 @@ def get_manual_time_input(dialog, config):
             return None
 
     return {
-        'intro_start_time': time_to_seconds(intro_start),
+        'intro_start_time': time_to_seconds(intro_start) if intro_start else 0,
         'intro_end_time': time_to_seconds(intro_end),
         'outro_start_time': time_to_seconds(outro_start) if outro_start else None
     }

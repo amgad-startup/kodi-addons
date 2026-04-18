@@ -1,12 +1,26 @@
 import re
 import json
+from urllib.parse import urlsplit, urlunsplit
 import xbmc
 import xbmcvfs
 
 
 def sanitize_path(path):
-    """Remove credentials from any scheme://user:pass@host URL for safe logging."""
-    return re.sub(r'(://)[^:]+:[^@]+@', r'\1***:***@', str(path))
+    """Remove credentials and URL tokens from paths before logging."""
+    value = str(path)
+    try:
+        parts = urlsplit(value)
+    except Exception:
+        parts = None
+
+    if parts and parts.scheme and (parts.netloc or value.startswith(parts.scheme + '://')):
+        netloc = parts.netloc
+        if '@' in netloc:
+            host = netloc.rsplit('@', 1)[1]
+            netloc = f'***:***@{host}'
+        return urlunsplit((parts.scheme, netloc, parts.path, '', ''))
+
+    return re.split(r'[?#]', value, maxsplit=1)[0]
 
 
 def safe_basename(path):
@@ -15,7 +29,8 @@ def safe_basename(path):
     os.path.basename fails on Windows for network URLs because it splits
     on backslash only. This splits on both / and \\ for cross-platform safety.
     """
-    return str(path).rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+    safe_path = sanitize_path(path)
+    return safe_path.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
 
 class ShowMetadata:
     def __init__(self):
@@ -69,7 +84,7 @@ class ShowMetadata:
         try:
             # Get just the filename without path — handle both native and network paths
             # Network paths (smb://...) won't translate properly, so split on both separators
-            basename = filename.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+            basename = safe_basename(filename)
             xbmc.log(f'SkipIntro: Parsing basename: {basename}', xbmc.LOGINFO)
             
             # Try to match show pattern

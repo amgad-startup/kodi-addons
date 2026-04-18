@@ -9,3 +9,5 @@ build.sh
 __pycache__/
 resources/lib/reload.py
 ffmpeg-test.py
+special:/
+**/passwords.xml

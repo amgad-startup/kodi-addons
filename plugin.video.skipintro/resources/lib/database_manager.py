@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 from datetime import datetime
+from urllib.parse import urlsplit, urlunsplit
 from resources.lib.database import ShowDatabase
 from resources.lib.metadata import sanitize_path
 
@@ -33,6 +34,23 @@ class DatabaseManager:
             xbmcvfs.mkdirs(self.addon_data_path)
 
     @staticmethod
+    def _vfs_join(directory, filename):
+        """Join paths without breaking Kodi URL-style VFS paths."""
+        directory = str(directory or '')
+        filename = str(filename or '').replace('\\', '/').rsplit('/', 1)[-1]
+        if '://' in directory:
+            return directory.rstrip('/\\') + '/' + filename
+        return os.path.join(directory, filename)
+
+    @staticmethod
+    def _is_safe_int(value):
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    @staticmethod
+    def _is_safe_number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    @staticmethod
     def _validate_import_config(config):
         """Validate and sanitize imported config values to prevent bad data in DB."""
         if not isinstance(config, dict):
@@ -41,7 +59,7 @@ class DatabaseManager:
         for key in ['intro_start_chapter', 'intro_end_chapter', 'outro_start_chapter']:
             val = config.get(key)
             if val is not None:
-                if isinstance(val, int) and 0 < val < 10000:
+                if DatabaseManager._is_safe_int(val) and 0 < val < 10000:
                     clean[key] = val
                 else:
                     clean[key] = None
@@ -50,7 +68,7 @@ class DatabaseManager:
         for key in ['intro_start_time', 'intro_end_time', 'outro_start_time']:
             val = config.get(key)
             if val is not None:
-                if isinstance(val, (int, float)) and 0 <= val <= 86400:
+                if DatabaseManager._is_safe_number(val) and 0 <= val <= 86400:
                     clean[key] = float(val)
                 else:
                     clean[key] = None
@@ -58,7 +76,7 @@ class DatabaseManager:
                 clean[key] = None
         intro_duration = config.get('intro_duration')
         if intro_duration is not None:
-            if isinstance(intro_duration, (int, float)) and 0 <= intro_duration <= 86400:
+            if DatabaseManager._is_safe_number(intro_duration) and 0 <= intro_duration <= 86400:
                 clean['intro_duration'] = int(intro_duration)
             else:
                 clean['intro_duration'] = None
@@ -75,9 +93,9 @@ class DatabaseManager:
             return None
         season = episode.get('season')
         episode_number = episode.get('episode')
-        if not isinstance(season, int) or season < 0 or season > 10000:
+        if not DatabaseManager._is_safe_int(season) or season < 0 or season > 10000:
             return None
-        if not isinstance(episode_number, int) or episode_number < 0 or episode_number > 10000:
+        if not DatabaseManager._is_safe_int(episode_number) or episode_number < 0 or episode_number > 10000:
             return None
 
         clean = {
@@ -89,13 +107,13 @@ class DatabaseManager:
         for key in ['intro_start_chapter', 'intro_end_chapter', 'outro_start_chapter']:
             val = episode.get(key)
             if val is not None:
-                clean[key] = val if isinstance(val, int) and 0 < val < 10000 else None
+                clean[key] = val if DatabaseManager._is_safe_int(val) and 0 < val < 10000 else None
             else:
                 clean[key] = None
         for key in ['intro_start_time', 'intro_end_time', 'outro_start_time']:
             val = episode.get(key)
             if val is not None:
-                clean[key] = float(val) if isinstance(val, (int, float)) and 0 <= val <= 86400 else None
+                clean[key] = float(val) if DatabaseManager._is_safe_number(val) and 0 <= val <= 86400 else None
             else:
                 clean[key] = None
         return clean
@@ -107,10 +125,13 @@ class DatabaseManager:
 
         if custom_path and custom_path.strip():
             path = xbmcvfs.translatePath(custom_path)
+            if '://' in path:
+                parts = urlsplit(path)
+                path = urlunsplit((parts.scheme, parts.netloc, parts.path, '', ''))
             xbmc.log(f'SkipIntro: Using custom backup path: {sanitize_path(path)}', xbmc.LOGINFO)
             # Ensure path ends with separator
-            if not path.endswith(os.sep):
-                path += os.sep
+            if not path.endswith(('/', '\\')):
+                path += '/' if '://' in path else os.sep
             return path
 
         xbmc.log(f'SkipIntro: Using default backup path: {sanitize_path(self.addon_data_path)}', xbmc.LOGINFO)
@@ -133,7 +154,7 @@ class DatabaseManager:
             # Create backup filename with timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             backup_filename = f'shows_backup_{timestamp}.db'
-            backup_path = os.path.join(backup_dir, backup_filename)
+            backup_path = self._vfs_join(backup_dir, backup_filename)
 
             # Copy database file
             if xbmcvfs.copy(self.db_path, backup_path):
@@ -297,7 +318,7 @@ class DatabaseManager:
             # Create export filename with timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             export_filename = f'skipintro_export_{timestamp}.json'
-            export_path = os.path.join(export_dir, export_filename)
+            export_path = self._vfs_join(export_dir, export_filename)
 
             # Write JSON file
             json_data = {
