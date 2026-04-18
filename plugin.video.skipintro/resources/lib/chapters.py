@@ -17,8 +17,11 @@ INTRO_START_NAMES = [
     'intro',
     'opening',
     'op',
+    'ncop',
     'opening credits',
     'opening theme',
+    'opening song',
+    'opening animation',
     'title sequence',
     'main title',
     'theme song',
@@ -27,7 +30,7 @@ INTRO_END_NAMES = ['intro end', 'intro over', 'after intro', 'post-intro',
                    'opening end', 'end opening', 'episode start',
                    'main content', 'act 1']
 OUTRO_START_NAMES = ['credits', 'end credits', 'ending', 'outro',
-                     'credits starting', 'ed', 'ending theme']
+                     'credits starting', 'ed', 'nced', 'ending theme']
 
 
 class ChapterManager:
@@ -90,6 +93,23 @@ class ChapterManager:
     MAX_CHAPTERS = 100
     MAX_CHAPTER_NAME_LEN = 200
 
+    @staticmethod
+    def _chapter_time_to_seconds(value) -> Optional[float]:
+        """Normalize enzyme chapter times to seconds.
+
+        enzyme converts ChapterTimeStart to datetime.timedelta, but leaves
+        ChapterTimeEnd as the raw Matroska nanosecond integer.
+        """
+        if value is None:
+            return None
+        if hasattr(value, 'total_seconds'):
+            return value.total_seconds()
+        if isinstance(value, (int, float)):
+            if value > 86400:
+                return value / 1000000000.0
+            return float(value)
+        return None
+
     def _get_chapters_enzyme(self, filepath: str) -> List[Dict]:
         """Parse MKV chapters using enzyme via Kodi VFS (works with SMB/NFS).
 
@@ -148,8 +168,8 @@ class ChapterManager:
 
                 chapters = []
                 for i, chapter in enumerate(mkv.chapters[:self.MAX_CHAPTERS], 1):
-                    start_seconds = chapter.start.total_seconds()
-                    end_seconds = chapter.end.total_seconds() if chapter.end else None
+                    start_seconds = self._chapter_time_to_seconds(chapter.start)
+                    end_seconds = self._chapter_time_to_seconds(chapter.end)
                     name = chapter.string if hasattr(chapter, 'string') and chapter.string else f'Chapter {i}'
                     name = name[:self.MAX_CHAPTER_NAME_LEN]
 
@@ -190,6 +210,24 @@ class ChapterManager:
 
     # --- Autodetect methods ---
 
+    @staticmethod
+    def _is_generic_chapter_name(name: str, number: Optional[int] = None) -> bool:
+        """Return True when a chapter label carries no semantic name."""
+        normalized = re.sub(r'[^a-z0-9]+', ' ', (name or '').lower()).strip()
+        if not normalized:
+            return True
+        if number is not None and normalized == f'chapter {number}':
+            return True
+        return bool(re.fullmatch(r'(chapter|ch|scene|part)?\s*\d+', normalized))
+
+    @classmethod
+    def has_meaningful_chapter_names(cls, chapters: List[Dict]) -> bool:
+        """Return True if at least one chapter has a non-generic name."""
+        for chapter in chapters or []:
+            if not cls._is_generic_chapter_name(chapter.get('name', ''), chapter.get('number')):
+                return True
+        return False
+
     def autodetect_intro(self, chapters: List[Dict]) -> Optional[Dict]:
         """Detect intro start/end from chapter names.
 
@@ -206,6 +244,9 @@ class ChapterManager:
         Returns None if no intro pattern is detected.
         """
         if not chapters:
+            return None
+        if not self.has_meaningful_chapter_names(chapters):
+            xbmc.log('SkipIntro: Autodetect skipped generic/count-only chapter names', xbmc.LOGINFO)
             return None
 
         intro_start = None
@@ -296,9 +337,19 @@ class ChapterManager:
         """Check if text matches any of the patterns (case-insensitive)."""
         normalized = re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()
         tokens = set(normalized.split())
+        compact_text = re.sub(r'[^a-z0-9]+', '', text.lower())
+        candidates = set(tokens)
+        if compact_text:
+            candidates.add(compact_text)
         for pattern in patterns:
             normalized_pattern = re.sub(r'[^a-z0-9]+', ' ', pattern.lower()).strip()
             if not normalized_pattern:
+                continue
+            compact_pattern = re.sub(r'[^a-z0-9]+', '', pattern.lower())
+            if compact_pattern in ('op', 'ed'):
+                variant_re = re.compile(rf'(?:nc)?{compact_pattern}\d*|{compact_pattern}v\d+')
+                if any(variant_re.fullmatch(candidate) for candidate in candidates):
+                    return True
                 continue
             if len(normalized_pattern) <= 3:
                 if normalized_pattern in tokens:

@@ -554,6 +554,10 @@ class SkipIntroPlayer(xbmc.Player):
                 return
 
             chapter_manager = ChapterManager()
+            if not chapter_manager.has_meaningful_chapter_names(chapters):
+                xbmc.log('SkipIntro: Autodetect needs named chapters; only generic/count-only chapters were available', xbmc.LOGINFO)
+                return
+
             detected = chapter_manager.autodetect_intro(chapters)
             if not detected:
                 xbmc.log('SkipIntro: Autodetect found no intro pattern in chapter names', xbmc.LOGINFO)

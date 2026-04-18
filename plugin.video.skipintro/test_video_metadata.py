@@ -4,6 +4,7 @@ import os
 import json
 import subprocess
 import warnings
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 # Suppress sqlite3 ResourceWarnings from mock teardown GC — the actual code
@@ -902,6 +903,33 @@ class TestChapterManager(unittest.TestCase):
         self.assertIsNone(result['intro_start_time'])
         self.assertIsNone(result['intro_end_time'])
 
+    def test_autodetect_intro_matches_op_variants(self):
+        """Anime OP variants such as OP1 and NCOP can mark intro starts"""
+        chapters = [
+            {'name': 'Chapter 1', 'time': 0, 'number': 1},
+            {'name': 'NCOP1', 'time': 42, 'number': 2},
+            {'name': 'Part A', 'time': 92, 'number': 3},
+            {'name': 'NCED', 'time': 1380, 'number': 4},
+        ]
+        result = self.mgr.autodetect_intro(chapters)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['intro_start_chapter'], 2)
+        self.assertEqual(result['intro_end_chapter'], 3)
+        self.assertEqual(result['intro_end_time'], 92)
+        self.assertEqual(result['outro_start_chapter'], 4)
+
+    def test_chapter_names_must_be_meaningful_for_autodetect(self):
+        """Count-only chapter labels explain why playback autodetect cannot match"""
+        chapters = [
+            {'name': 'Chapter 1', 'number': 1},
+            {'name': 'Chapter 2', 'number': 2},
+            {'name': '3', 'number': 3},
+        ]
+
+        self.assertFalse(self.mgr.has_meaningful_chapter_names(chapters))
+        self.assertIsNone(self.mgr.autodetect_intro(chapters))
+
     def test_autodetect_opening_credits_is_not_outro(self):
         """Opening Credits should be classified as intro, not end credits"""
         chapters = [
@@ -927,6 +955,26 @@ class TestChapterManager(unittest.TestCase):
         self.assertEqual(result['intro_start_chapter'], 1)
         self.assertEqual(result['intro_end_chapter'], 1)
         self.assertEqual(result['intro_end_time'], 80)
+
+    def test_enzyme_chapter_end_nanoseconds_are_normalized(self):
+        """enzyme leaves ChapterTimeEnd as nanoseconds, unlike start times"""
+        class FakeChapter:
+            def __init__(self, start, end, string):
+                self.start = start
+                self.end = end
+                self.string = string
+
+        class FakeMKV:
+            chapters = [
+                FakeChapter(timedelta(seconds=2), 5000000000, 'NCOP1'),
+            ]
+
+        with patch('resources.lib.chapters.enzyme.MKV', return_value=FakeMKV()):
+            chapters = self.mgr._get_chapters_enzyme('/tmp/fake.mkv')
+
+        self.assertEqual(chapters[0]['time'], 2)
+        self.assertEqual(chapters[0]['end_time'], 5)
+        self.assertEqual(chapters[0]['name'], 'NCOP1')
 
 
 class TestAudioIntroDetector(unittest.TestCase):
