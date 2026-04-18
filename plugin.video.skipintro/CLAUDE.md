@@ -12,12 +12,24 @@ Kodi addon (`plugin.video.skipintro`) that detects, remembers, and skips TV show
 # Run tests (mocks Kodi modules so no Kodi installation needed)
 python3 test_video_metadata.py -v
 
-# Run tests on ARM64 container (matches Android TV)
-docker run --rm -v $(pwd):/addon kodi-skipintro-test:arm64 test
+# Run coverage report for repo-owned Python files
+./test-container/run-coverage.sh
+
+# Run Linux ARM64 and AMD64 unit-test containers
+./test-container/test-all.sh
+
+# Run headless Kodi E2E with generated synthetic media
+./test-container/run-e2e-container.sh
 
 # Build release zip (from sibling directory)
 cd ../repository.skipintro && ./build.sh
 ```
+
+Current automated status:
+- 137 mocked unit tests
+- 4 headless Kodi E2E tests
+- 55% measured coverage across repo-owned Python files
+- Linux ARM64/AMD64 containers and ARM64 Kodi E2E pass locally when Docker/Colima is running
 
 ## Architecture
 
@@ -28,7 +40,7 @@ The addon registers three Kodi extension points (see `addon.xml`):
 
 ### Entry Points
 
-**`default.py`** — `SkipIntroPlayer(xbmc.Player)` subclass runs in a main loop polling every 500ms. On `onAVStarted`, it detects the show, looks up saved times, falls back to chapter detection or default delay, then sets a timer to show the skip button at the right moment. The intro detection priority is: saved DB times → chapter markers (via ffmpeg) → configurable default delay.
+**`default.py`** — `SkipIntroPlayer(xbmc.Player)` subclass runs in a main loop polling every 500ms. On `onAVStarted`, it detects the show, looks up saved times, tries chapter autodetection when no saved markers exist, then sets a timer to show the skip button at the right moment. There is no synthetic default skip window; unconfigured shows do not jump.
 
 **`context.py`** — Standalone script invoked from Kodi's context menu. Lets users choose between manual time input (MM:SS) or chapter number selection, then saves to the database.
 
@@ -40,16 +52,17 @@ The addon registers three Kodi extension points (see `addon.xml`):
 |---|---|---|
 | `database.py` | `ShowDatabase` | SQLite persistence. Tables: `shows`, `shows_config`, `episodes`. Auto-migrates schema on init. |
 | `metadata.py` | `ShowMetadata` | Identifies current show via Kodi info labels, falls back to filename regex (`SxxExx` / `xxXxx`). Also has a `get_chapters()` method using Kodi JSON-RPC. |
-| `chapters.py` | `ChapterManager` | Gets chapter data via **ffmpeg** subprocess (`-f ffmetadata`), caches results per file. Uses `shutil.which('ffmpeg')` for cross-platform path discovery. |
+| `chapters.py` | `ChapterManager` | Gets chapter data from Kodi plus enzyme-based MKV chapter parsing through Kodi VFS, caches results per file, and falls back to InfoLabels for chapter count. |
 | `settings.py` | `Settings` | Reads/validates addon settings from `resources/settings.xml`, enforces bounds, provides defaults. |
 | `ui.py` | `PlayerUI`, `SkipIntroDialog` | `WindowXMLDialog` overlay for the skip button (`skip_button.xml`). |
 | `show.py` | `ShowManager` | Higher-level facade combining `ShowMetadata` + `ShowDatabase`. |
 
 ### Key Design Details
 
-- **Two chapter detection paths**: `ChapterManager` uses ffmpeg subprocess; `ShowMetadata.get_chapters()` uses Kodi JSON-RPC. The player uses `ChapterManager` (ffmpeg) via `getChapters()`.
+- **Two chapter detection paths**: `ChapterManager` reads MKV chapter names/timestamps through Kodi VFS when possible, then falls back to InfoLabels for chapter count. `ShowMetadata.get_chapters()` also uses InfoLabels for platform-safe chapter count fallback.
 - **Database schema**: `shows` (id, title) → `shows_config` (show-level intro/outro settings, supports both time-based and chapter-based) → `episodes` (per-episode overrides). The `get_show()` method auto-creates entries.
 - **Skip button timing**: Uses `show_from_start` flag for chapter-only mode (button visible from start), otherwise waits until `intro_start` time is reached.
+- **Path/security handling**: `metadata.sanitize_path()` strips credentials, query strings, and fragments before logging/display. Database backup/export paths use Kodi VFS-compatible joining and strip generated filenames down to basenames.
 - **Localization**: String IDs defined in `resources/language/resource.language.en_gb/strings.po`, referenced by numeric ID (32000+) in `settings.xml`.
 
 ## Kodi API Patterns

@@ -20,6 +20,12 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Install test tooling
+        run: python -m pip install coverage
+
+      - name: Run unit tests with coverage report
+        run: ./test-container/run-coverage.sh
+
       - name: Get version from addon.xml
         run: |
           VERSION=$(grep -oP 'version="\K[^"]+' addon.xml | head -1)

@@ -10,6 +10,9 @@ version: "3.8"
 # Kodi integration (requires Kodi PPA — ARM64 only on Apple Silicon):
 #   docker compose -f test-container/docker-compose.yml run kodi-arm64 shell
 #   docker compose -f test-container/docker-compose.yml up kodi-arm64
+#   docker compose -f test-container/docker-compose.yml run --rm kodi-e2e-arm64
+# If Docker Compose is unavailable:
+#   ./test-container/run-e2e-container.sh
 
 services:
   # --- Unit Tests (lightweight, no Kodi required) ---
@@ -48,3 +51,14 @@ services:
     ports:
       - "8080:8080"
       - "9090:9090"
+
+  # ARM64 synthetic-media E2E suite driven through Kodi JSON-RPC
+  kodi-e2e-arm64:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/arm64
+    image: kodi-skipintro-test:arm64
+    volumes:
+      - ..:/addon
+    command: e2e

@@ -8,6 +8,8 @@ cd "$(dirname "$0")/.."
 echo "=========================================="
 echo "Skip Intro Addon — Multi-Platform Tests"
 echo "=========================================="
+echo "Unit containers only. Run Kodi E2E separately with:"
+echo "  ./test-container/run-e2e-container.sh"
 
 PASS=0
 FAIL=0

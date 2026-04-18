@@ -50,6 +50,36 @@ if [ "${1}" = "test" ]; then
     exit $?
 fi
 
+# If first arg is "e2e", start Kodi and run JSON-RPC E2E tests
+if [ "${1}" = "e2e" ]; then
+    echo "==> Starting Xvfb on :99 for E2E"
+    rm -f /tmp/.X99-lock
+    Xvfb :99 -screen 0 1280x720x24 &
+    XVFB_PID=$!
+    sleep 1
+
+    KODI_BIN=$(find /usr/lib -name "kodi.bin" -type f 2>/dev/null | head -1)
+    if [ -z "$KODI_BIN" ]; then
+        echo "ERROR: kodi.bin not found"
+        kill "$XVFB_PID" 2>/dev/null || true
+        exit 1
+    fi
+
+    echo "==> Starting Kodi for E2E ($KODI_BIN)"
+    "$KODI_BIN" --standalone --debug &
+    KODI_PID=$!
+
+    cleanup() {
+        kill "$KODI_PID" 2>/dev/null || true
+        kill "$XVFB_PID" 2>/dev/null || true
+    }
+    trap cleanup EXIT
+
+    cd "$ADDON_SRC"
+    python3 test-container/e2e_kodi.py -v
+    exit $?
+fi
+
 # If first arg is "shell", drop to bash
 if [ "${1}" = "shell" ]; then
     exec /bin/bash

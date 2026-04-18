@@ -17,7 +17,7 @@ The Skip Intro Addon for Kodi intelligently detects, remembers, and skips TV sho
   - Multiple detection methods:
     - Database of saved times
     - Chapter markers
-    - Configurable default timing
+    - Audio fingerprint detection
     - Online API support (coming soon)
 
 - **User-Friendly Interface**
@@ -62,38 +62,30 @@ The addon provides three categories of settings:
 
 1. **Intro Skipping Settings**
 
-   - **Delay Before Prompt** (0-300 seconds)
-     - How long to wait before showing the skip prompt
-     - Default: 30 seconds
-   - **Skip Duration** (10-300 seconds)
-     - How far forward to skip when using default skip
-     - Default: 60 seconds
+   - **Enable Autoskip**
+     - Automatically skip once a saved or detected intro marker is reached
+     - Default: Enabled
+   - **Pre-Skip Warning**
+     - How many seconds before the skip point to show the prompt
+     - Default: 3 seconds
+   - **Delay Autoskip**
+     - Optional delay after a known intro start before autoskip runs
+     - Default: 0 seconds
+   - **Auto Dismiss Button**
+     - Optional timeout for closing the skip prompt
+     - Default: 0 seconds
 
 2. **Database Settings**
 
-   - **Database Location**
-     - Where to store the show database
-     - Default: special://userdata/addon_data/plugin.video.skipintro/shows.db
-   - **Use Chapter Markers**
-     - Enable/disable chapter-based detection
-     - Default: Enabled
-   - **Use Online API**
-     - Enable/disable online time source (coming soon)
-     - Default: Disabled
-   - **Save Times**
-     - Whether to save detected times for future use
-     - Default: Enabled
-
-3. **Show Settings**
-   - **Use Show Defaults**
-     - Use the same intro/outro times for all episodes
-     - Default: Enabled
-   - **Use Chapter Numbers**
-     - Use chapter numbers instead of timestamps
-     - Default: Disabled
-   - **Default Intro Duration**
-     - Duration of intro when using show defaults
-     - Default: 60 seconds
+   - **Backup/Restore Location**
+     - Where database backups and JSON exports are saved
+     - Default: special://userdata/addon_data/plugin.video.skipintro/
+   - **Backup Database**
+     - Creates a timestamped copy of the SQLite database
+   - **Restore Database**
+     - Replaces the current database from a selected backup
+   - **Export/Import JSON**
+     - Moves saved show and episode skip points between installs
 
 ## How It Works
 
@@ -157,17 +149,11 @@ The addon uses multiple methods to detect and skip intros:
 
    - From the library context menu, choose "Set Skip Intro Times" and then "Auto-detect from episode audio"
    - The addon extracts the first 10 minutes from up to three nearby episodes using `ffmpeg`
-   - If `inaSpeechSegmenter` is available in Kodi's Python environment, it looks for a long music block followed by silence/dialogue
+   - It fingerprints the audio and looks for a common opening block across episodes
    - The detected median show timing is saved as a show default, and the selected episode also gets an episode-specific override
-   - If `ffmpeg` or `inaSpeechSegmenter` is unavailable, the addon leaves existing skip times unchanged
+   - If `ffmpeg` is unavailable, the addon leaves existing skip times unchanged
 
-5. **Default Skip:**
-
-   - Falls back to configured delay if no other times found
-   - Shows skip button after delay time
-   - Option to save user-confirmed times
-
-6. **Online API** (Coming Soon):
+5. **Online API** (Coming Soon):
    - Will fetch intro/outro times from online database
    - Requires API key (not yet implemented)
 
@@ -185,18 +171,58 @@ To update the addon, download the latest `plugin.video.skipintro-<version>.zip` 
 
 ### Testing
 
-The addon includes unit tests (mocks Kodi modules, no Kodi install needed):
+Current automated coverage:
+
+- Unit tests: 137 mocked tests in `test_video_metadata.py`
+- E2E tests: 4 headless Kodi tests in `test-container/e2e_kodi.py`
+- Coverage: 55% across repo-owned Python files with generated/vendor code excluded
+- Last verified locally: unit suite, coverage suite, Linux ARM64/AMD64 containers, and ARM64 Kodi E2E all passed
+
+Run the unit tests (mocks Kodi modules, no Kodi install needed):
 
 ```bash
 cd plugin.video.skipintro
 python3 test_video_metadata.py -v
 ```
 
-Or run on the ARM64 test container:
+Coverage for addon-owned runtime code:
 
 ```bash
-docker run --rm -v $(pwd):/addon kodi-skipintro-test:arm64 test
+./test-container/run-coverage.sh
 ```
+
+Run the Linux ARM64 and AMD64 unit-test containers:
+
+```bash
+./test-container/test-all.sh
+```
+
+Run the headless Kodi E2E suite with generated synthetic media:
+
+```bash
+./test-container/run-e2e-container.sh
+```
+
+If your Docker install includes the Compose plugin, this equivalent command is
+also available: `docker compose -f test-container/docker-compose.yml run --rm kodi-e2e-arm64`.
+
+The E2E container starts Kodi under Xvfb, generates short MKV/MP4 fixtures with
+`ffmpeg`, seeds the addon SQLite database, and drives playback through Kodi
+JSON-RPC. The suite verifies addon availability, manual time-based skipping,
+unconfigured playback, and chapter-based skipping.
+
+Run the synthetic audio auto-detection harness:
+
+```bash
+python3 test-container/audio_detection_harness.py
+```
+
+The harness creates deterministic MKV fixtures with a shared intro block and
+exercises the same candidate discovery plus audio fingerprint detector used by
+the context-menu auto-detect flow.
+
+Manual hardware smoke coverage for Intel Mac, Windows, Raspberry Pi, Android,
+and iOS feasibility is tracked in `test-container/platform-matrix.md`.
 
 ### Building
 
@@ -215,13 +241,15 @@ This will create the addon zip and update repository files.
 plugin.video.skipintro/
 ├── addon.xml           # Addon metadata and dependencies
 ├── default.py         # Main addon code
+├── status.md          # Current test/coverage/platform status
+├── test_video_metadata.py # Mocked unit suite
+├── test-container/    # Container, E2E, coverage, and platform smoke tooling
 ├── resources/
 │   ├── lib/
 │   │   ├── database.py   # Database operations
 │   │   └── metadata.py   # Show detection
 │   ├── settings.xml   # Settings definition
 │   └── language/      # Localization files
-├── tests/             # Unit tests
 └── build.sh          # Build script
 ```
 

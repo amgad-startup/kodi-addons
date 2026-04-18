@@ -14,8 +14,8 @@ The Skip Intro Addon (`plugin.video.skipintro`) detects, remembers, and skips TV
 
 **Detection methods (in priority order):**
 1. Saved times from SQLite database (per-show or per-episode)
-2. Chapter markers via ffmpeg (`-f ffmetadata`)
-3. Configurable default delay (fallback)
+2. Chapter markers
+3. Audio fingerprint detection from nearby episodes
 
 **Features:**
 - Context menu "Set Skip Intro Times" for manual time or chapter input
