@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import xbmc
 import xbmcvfs
@@ -90,10 +90,14 @@ class AudioIntroDetector:
         self._segmenter_factory = segmenter_factory
         self._segmenter = None
 
-    def detect_show_intro(self, episode_files: Sequence[str]) -> Optional[Dict[str, float]]:
+    def detect_show_intro(
+        self,
+        episode_files: Sequence[str],
+        diagnostics: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, float]]:
         """Analyze a few episodes and return a show-level intro estimate."""
         if self.backend == 'fingerprint':
-            return self.detect_show_intro_by_fingerprint(episode_files)
+            return self.detect_show_intro_by_fingerprint(episode_files, diagnostics=diagnostics)
 
         detections = []
         for episode_file in episode_files[:self.max_episodes]:
@@ -137,10 +141,31 @@ class AudioIntroDetector:
             'source': 'audio'
         }
 
-    def detect_show_intro_by_fingerprint(self, episode_files: Sequence[str]) -> Optional[Dict[str, float]]:
+    def detect_show_intro_by_fingerprint(
+        self,
+        episode_files: Sequence[str],
+        diagnostics: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, float]]:
         """Find common intro audio across episodes using lightweight fingerprints."""
         ffmpeg = self._find_ffmpeg()
         analyzed = []
+        if diagnostics is not None:
+            diagnostics.clear()
+            diagnostics.update({
+                'parameters': {
+                    'max_scan_seconds': self.max_scan_seconds,
+                    'max_episodes': self.max_episodes,
+                    'fingerprint_window_seconds': self.fingerprint_window_seconds,
+                    'fingerprint_hop_seconds': self.fingerprint_hop_seconds,
+                    'fingerprint_min_common_seconds': self.fingerprint_min_common_seconds,
+                    'fingerprint_hamming_distance': self.fingerprint_hamming_distance,
+                    'intro_limit_ratio': self.intro_limit_ratio,
+                },
+                'episodes': [],
+                'pairs': [],
+                'rejection_counts': {},
+                'status': 'running',
+            })
 
         for episode_file in episode_files[:self.max_episodes]:
             try:
@@ -161,33 +186,77 @@ class AudioIntroDetector:
                     'duration': duration,
                     'fingerprints': fingerprints
                 })
+                if diagnostics is not None:
+                    diagnostics['episodes'].append({
+                        'file': sanitize_path(episode_file),
+                        'duration': duration,
+                        'fingerprints': self._fingerprint_series_summary(fingerprints),
+                    })
 
         if len(analyzed) < 2:
+            if diagnostics is not None:
+                diagnostics['status'] = 'miss'
+                diagnostics['failure_reason'] = 'insufficient_analyzed_episodes'
+                diagnostics['analyzed_episode_count'] = len(analyzed)
             return None
 
         best = None
         best_rejected = None
         for left_index in range(len(analyzed)):
             for right_index in range(left_index + 1, len(analyzed)):
+                pair_diagnostics = None
+                if diagnostics is not None:
+                    pair_diagnostics = {
+                        'left_index': left_index,
+                        'right_index': right_index,
+                        'left_file': sanitize_path(str(analyzed[left_index]['file'])),
+                        'right_file': sanitize_path(str(analyzed[right_index]['file'])),
+                        'rejection_counts': {},
+                        'top_candidates': [],
+                    }
                 pair_match = self._find_common_fingerprint_run(
                     analyzed[left_index]['fingerprints'],
                     analyzed[right_index]['fingerprints'],
                     left_max_end=self._intro_end_limit(analyzed[left_index].get('duration')),
-                    right_max_end=self._intro_end_limit(analyzed[right_index].get('duration'))
+                    right_max_end=self._intro_end_limit(analyzed[right_index].get('duration')),
+                    diagnostics=pair_diagnostics
                 )
+                if diagnostics is not None:
+                    if pair_match:
+                        pair_diagnostics['best_in_bounds'] = self._fingerprint_candidate_summary(pair_match)
+                    elif pair_diagnostics.get('matching_window_count', 0) == 0:
+                        pair_diagnostics['failure_reason'] = 'no_matching_fingerprints'
+                    elif pair_diagnostics.get('candidate_count', 0) == 0:
+                        pair_diagnostics['failure_reason'] = 'no_positive_duration_candidates'
+                    elif pair_diagnostics['rejection_counts']:
+                        pair_diagnostics['failure_reason'] = 'all_candidates_rejected'
+                    else:
+                        pair_diagnostics['failure_reason'] = 'no_candidate'
                 if not pair_match:
+                    if diagnostics is not None:
+                        diagnostics['pairs'].append(pair_diagnostics)
                     continue
 
                 duration = self._fingerprint_threshold_duration(pair_match)
                 if duration < self.fingerprint_min_common_seconds:
+                    if diagnostics is not None:
+                        pair_diagnostics['failure_reason'] = 'below_min_common_seconds'
+                        pair_diagnostics['selected_rejection'] = 'below_min_common_seconds'
+                        pair_diagnostics['selected_threshold_duration'] = duration
                     if self._is_better_fingerprint_match(pair_match, best_rejected):
                         best_rejected = dict(pair_match)
+                    if diagnostics is not None:
+                        diagnostics['pairs'].append(pair_diagnostics)
                     continue
 
                 if self._is_better_fingerprint_match(pair_match, best):
                     best = dict(pair_match)
                     best['left_file'] = analyzed[left_index]['file']
                     best['right_file'] = analyzed[right_index]['file']
+                    if diagnostics is not None:
+                        pair_diagnostics['selected'] = True
+                if diagnostics is not None:
+                    diagnostics['pairs'].append(pair_diagnostics)
 
         if not best:
             if best_rejected:
@@ -197,6 +266,14 @@ class AudioIntroDetector:
                     f'{self.fingerprint_min_common_seconds:.1f}s',
                     xbmc.LOGINFO
                 )
+            if diagnostics is not None:
+                diagnostics['status'] = 'miss'
+                diagnostics['failure_reason'] = self._fingerprint_failure_reason(diagnostics, best_rejected)
+                diagnostics['best_rejected'] = (
+                    self._fingerprint_candidate_summary(best_rejected)
+                    if best_rejected else None
+                )
+                diagnostics['rejection_counts'] = self._aggregate_pair_rejections(diagnostics.get('pairs', []))
             return None
 
         detections = [
@@ -233,6 +310,11 @@ class AudioIntroDetector:
             result['outro_start_time'] = outro['outro_start_time']
             result['outro_match_duration'] = outro['duration']
             result['outro_detections'] = outro['detections']
+        if diagnostics is not None:
+            diagnostics['status'] = 'hit'
+            diagnostics['failure_reason'] = None
+            diagnostics['best_match'] = self._fingerprint_candidate_summary(best)
+            diagnostics['rejection_counts'] = self._aggregate_pair_rejections(diagnostics.get('pairs', []))
         return result
 
     def _detect_outro_by_fingerprint(self, analyzed: List[Dict[str, object]], ffmpeg: str) -> Optional[Dict[str, object]]:
@@ -670,10 +752,14 @@ class AudioIntroDetector:
         left_min_start: Optional[float] = None,
         right_min_start: Optional[float] = None,
         left_max_end: Optional[float] = None,
-        right_max_end: Optional[float] = None
+        right_max_end: Optional[float] = None,
+        diagnostics: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, float]]:
         best = None
         previous_runs = {}
+        matching_window_count = 0
+        candidate_count = 0
+        rejection_counts = {}
 
         for left_index, left_item in enumerate(left):
             current_runs = {}
@@ -690,6 +776,7 @@ class AudioIntroDetector:
                 distance = self._hamming_distance(int(left_hash), int(right_hash))
                 if distance > self.fingerprint_hamming_distance:
                     continue
+                matching_window_count += 1
 
                 previous = previous_runs.get(right_index - 1)
                 if previous:
@@ -727,6 +814,7 @@ class AudioIntroDetector:
                 )
                 if duration <= 0:
                     continue
+                candidate_count += 1
                 candidate = {
                     'duration': duration,
                     'raw_duration': raw_duration,
@@ -741,19 +829,28 @@ class AudioIntroDetector:
                     'average_distance': distance_total / float(length),
                     'start_spread': abs(left_start_time - right_start_time)
                 }
-                if not self._fingerprint_match_in_bounds(
+                rejection_reasons = self._fingerprint_match_bounds_reasons(
                     candidate,
                     left_min_start=left_min_start,
                     right_min_start=right_min_start,
                     left_max_end=left_max_end,
                     right_max_end=right_max_end
-                ):
+                )
+                if rejection_reasons:
+                    for reason in rejection_reasons:
+                        rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+                    self._record_fingerprint_candidate(diagnostics, candidate, rejection_reasons[0])
                     continue
+                self._record_fingerprint_candidate(diagnostics, candidate, None)
                 if self._is_better_fingerprint_match(candidate, best):
                     best = candidate
 
             previous_runs = current_runs
 
+        if diagnostics is not None:
+            diagnostics['matching_window_count'] = matching_window_count
+            diagnostics['candidate_count'] = candidate_count
+            diagnostics['rejection_counts'] = rejection_counts
         return best
 
     def _fingerprint_run_hop(self, fingerprints: List[Dict[str, float]], start_index: int, end_index: int) -> float:
@@ -768,6 +865,33 @@ class AudioIntroDetector:
         return float(max(match.get('duration', 0), match.get('raw_duration', 0)))
 
     @staticmethod
+    def _fingerprint_match_bounds_reasons(
+        match: Dict[str, float],
+        left_min_start: Optional[float] = None,
+        right_min_start: Optional[float] = None,
+        left_max_end: Optional[float] = None,
+        right_max_end: Optional[float] = None
+    ) -> List[str]:
+        reasons = []
+        if left_min_start is not None and match['left_start_time'] < left_min_start:
+            reasons.append('left_start_before_min')
+        if left_min_start is not None and match.get('raw_left_start_time', match['left_start_time']) < left_min_start:
+            reasons.append('raw_left_start_before_min')
+        if right_min_start is not None and match['right_start_time'] < right_min_start:
+            reasons.append('right_start_before_min')
+        if right_min_start is not None and match.get('raw_right_start_time', match['right_start_time']) < right_min_start:
+            reasons.append('raw_right_start_before_min')
+        if left_max_end is not None and match['left_end_time'] > left_max_end:
+            reasons.append('left_end_after_max')
+        if left_max_end is not None and match.get('raw_left_end_time', match['left_end_time']) > left_max_end:
+            reasons.append('raw_left_end_after_max')
+        if right_max_end is not None and match['right_end_time'] > right_max_end:
+            reasons.append('right_end_after_max')
+        if right_max_end is not None and match.get('raw_right_end_time', match['right_end_time']) > right_max_end:
+            reasons.append('raw_right_end_after_max')
+        return reasons
+
+    @staticmethod
     def _fingerprint_match_in_bounds(
         match: Dict[str, float],
         left_min_start: Optional[float] = None,
@@ -775,23 +899,121 @@ class AudioIntroDetector:
         left_max_end: Optional[float] = None,
         right_max_end: Optional[float] = None
     ) -> bool:
-        if left_min_start is not None and match['left_start_time'] < left_min_start:
-            return False
-        if left_min_start is not None and match.get('raw_left_start_time', match['left_start_time']) < left_min_start:
-            return False
-        if right_min_start is not None and match['right_start_time'] < right_min_start:
-            return False
-        if right_min_start is not None and match.get('raw_right_start_time', match['right_start_time']) < right_min_start:
-            return False
-        if left_max_end is not None and match['left_end_time'] > left_max_end:
-            return False
-        if left_max_end is not None and match.get('raw_left_end_time', match['left_end_time']) > left_max_end:
-            return False
-        if right_max_end is not None and match['right_end_time'] > right_max_end:
-            return False
-        if right_max_end is not None and match.get('raw_right_end_time', match['right_end_time']) > right_max_end:
-            return False
-        return True
+        return not AudioIntroDetector._fingerprint_match_bounds_reasons(
+            match,
+            left_min_start=left_min_start,
+            right_min_start=right_min_start,
+            left_max_end=left_max_end,
+            right_max_end=right_max_end
+        )
+
+    def _fingerprint_candidate_summary(
+        self,
+        match: Optional[Dict[str, float]],
+        rejection_reason: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        if not match:
+            return None
+        summary = {
+            'duration': round(float(match.get('duration', 0)), 3),
+            'raw_duration': round(float(match.get('raw_duration', 0)), 3),
+            'threshold_duration': round(self._fingerprint_threshold_duration(match), 3),
+            'duration_bucket': self._fingerprint_duration_bucket(match),
+            'left_start_time': round(float(match.get('left_start_time', 0)), 3),
+            'left_end_time': round(float(match.get('left_end_time', 0)), 3),
+            'right_start_time': round(float(match.get('right_start_time', 0)), 3),
+            'right_end_time': round(float(match.get('right_end_time', 0)), 3),
+            'start_spread': round(float(match.get('start_spread', 0)), 3),
+            'average_distance': round(float(match.get('average_distance', 0)), 3),
+        }
+        if rejection_reason:
+            summary['rejection_reason'] = rejection_reason
+        return summary
+
+    def _record_fingerprint_candidate(
+        self,
+        diagnostics: Optional[Dict[str, Any]],
+        candidate: Dict[str, float],
+        rejection_reason: Optional[str]
+    ) -> None:
+        if diagnostics is None:
+            return
+        top_candidates = diagnostics.setdefault('top_candidates', [])
+        top_candidates.append(self._fingerprint_candidate_summary(candidate, rejection_reason))
+        top_candidates.sort(
+            key=lambda item: (
+                item.get('threshold_duration', 0),
+                -item.get('start_spread', 0),
+                -item.get('average_distance', 0)
+            ),
+            reverse=True
+        )
+        del top_candidates[8:]
+
+    @staticmethod
+    def _fingerprint_duration_bucket(match: Dict[str, float]) -> str:
+        duration = AudioIntroDetector._fingerprint_threshold_duration(match)
+        if duration < 15:
+            return 'too_short'
+        if duration < 45:
+            return 'short'
+        if duration < 120:
+            return 'normal'
+        if duration <= 180:
+            return 'long'
+        return 'suspicious'
+
+    @staticmethod
+    def _fingerprint_series_summary(fingerprints: List[Dict[str, float]]) -> Dict[str, Any]:
+        rms_values = [float(item.get('rms', 0) or 0) for item in fingerprints]
+        valid_hash_count = sum(1 for item in fingerprints if item.get('hash') is not None)
+        if not rms_values:
+            return {
+                'window_count': 0,
+                'valid_hash_count': 0,
+                'missing_hash_count': 0,
+                'quiet_window_count': 0,
+            }
+        sorted_rms = sorted(rms_values)
+        return {
+            'window_count': len(fingerprints),
+            'valid_hash_count': valid_hash_count,
+            'missing_hash_count': len(fingerprints) - valid_hash_count,
+            'quiet_window_count': sum(1 for value in rms_values if value <= 1),
+            'rms_min': round(sorted_rms[0], 3),
+            'rms_median': round(sorted_rms[len(sorted_rms) // 2], 3),
+            'rms_max': round(sorted_rms[-1], 3),
+            'rms_average': round(sum(rms_values) / float(len(rms_values)), 3),
+        }
+
+    @staticmethod
+    def _aggregate_pair_rejections(pairs: List[Dict[str, Any]]) -> Dict[str, int]:
+        aggregate = {}
+        for pair in pairs:
+            for reason, count in pair.get('rejection_counts', {}).items():
+                aggregate[reason] = aggregate.get(reason, 0) + int(count)
+            selected_rejection = pair.get('selected_rejection')
+            if selected_rejection:
+                aggregate[selected_rejection] = aggregate.get(selected_rejection, 0) + 1
+        return aggregate
+
+    @staticmethod
+    def _fingerprint_failure_reason(
+        diagnostics: Dict[str, Any],
+        best_rejected: Optional[Dict[str, float]]
+    ) -> str:
+        pairs = diagnostics.get('pairs', [])
+        if not pairs:
+            return 'no_episode_pairs'
+        if best_rejected:
+            return 'below_min_common_seconds'
+        if all(pair.get('matching_window_count', 0) == 0 for pair in pairs):
+            return 'no_matching_fingerprints'
+        if all(pair.get('candidate_count', 0) == 0 for pair in pairs):
+            return 'no_positive_duration_candidates'
+        if any(pair.get('rejection_counts') for pair in pairs):
+            return 'all_candidates_rejected'
+        return 'no_common_fingerprint_match'
 
     @staticmethod
     def _is_better_fingerprint_match(candidate: Dict[str, float], current: Optional[Dict[str, float]]) -> bool:

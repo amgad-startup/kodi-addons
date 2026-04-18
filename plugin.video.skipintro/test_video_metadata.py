@@ -1019,6 +1019,81 @@ class TestAudioIntroDetector(unittest.TestCase):
         self.assertEqual(result['matching_episode_count'], 2)
         self.assertEqual(result['source'], 'audio_fingerprint')
 
+    def test_detect_show_intro_by_fingerprint_populates_diagnostics(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        common = [
+            0xAAAAAAAAAAAAAAAA,
+            0xCCCCCCCCCCCCCCCC,
+            0xF0F0F0F0F0F0F0F0,
+            0x0F0F0F0F0F0F0F0F,
+        ]
+
+        def fingerprints(values):
+            return [
+                {'time': index * 2, 'hash': value, 'rms': 1000 + index}
+                for index, value in enumerate(values)
+            ]
+
+        detector = AudioIntroDetector(
+            backend='fingerprint',
+            fingerprint_window_seconds=2,
+            fingerprint_min_common_seconds=6,
+            fingerprint_hamming_distance=0
+        )
+        detector._find_ffmpeg = MagicMock(return_value='ffmpeg')
+        detector._probe_duration = MagicMock(return_value=120)
+        detector._fingerprint_file = MagicMock(side_effect=[
+            fingerprints([0x1111111111111111] + common),
+            fingerprints([0x3333333333333333] + common),
+        ])
+        diagnostics = {}
+
+        result = detector.detect_show_intro(['e1.strm', 'e2.strm'], diagnostics=diagnostics)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(diagnostics['status'], 'hit')
+        self.assertEqual(len(diagnostics['episodes']), 2)
+        self.assertEqual(diagnostics['episodes'][0]['fingerprints']['window_count'], 5)
+        self.assertEqual(diagnostics['episodes'][0]['fingerprints']['valid_hash_count'], 5)
+        self.assertEqual(len(diagnostics['pairs']), 1)
+        self.assertGreater(diagnostics['pairs'][0]['candidate_count'], 0)
+        self.assertIn('best_match', diagnostics)
+        self.assertEqual(diagnostics['best_match']['duration_bucket'], 'too_short')
+
+    def test_detect_show_intro_by_fingerprint_diagnostics_explain_miss(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        common = [
+            0xAAAAAAAAAAAAAAAA,
+            0xCCCCCCCCCCCCCCCC,
+        ]
+
+        def fingerprints(values):
+            return [{'time': index * 2, 'hash': value, 'rms': 1000} for index, value in enumerate(values)]
+
+        detector = AudioIntroDetector(
+            backend='fingerprint',
+            fingerprint_window_seconds=2,
+            fingerprint_min_common_seconds=30,
+            fingerprint_hamming_distance=0
+        )
+        detector._find_ffmpeg = MagicMock(return_value='ffmpeg')
+        detector._probe_duration = MagicMock(return_value=120)
+        detector._fingerprint_file = MagicMock(side_effect=[
+            fingerprints([0x1111111111111111] + common),
+            fingerprints([0x3333333333333333] + common),
+        ])
+        diagnostics = {}
+
+        result = detector.detect_show_intro(['e1.strm', 'e2.strm'], diagnostics=diagnostics)
+
+        self.assertIsNone(result)
+        self.assertEqual(diagnostics['status'], 'miss')
+        self.assertEqual(diagnostics['failure_reason'], 'below_min_common_seconds')
+        self.assertEqual(diagnostics['rejection_counts']['below_min_common_seconds'], 1)
+        self.assertEqual(diagnostics['best_rejected']['duration_bucket'], 'too_short')
+
     def test_detect_show_intro_by_fingerprint_default_accepts_shorter_intro(self):
         from resources.lib.audio_intro import AudioIntroDetector
 

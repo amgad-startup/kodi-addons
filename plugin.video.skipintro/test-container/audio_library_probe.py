@@ -9,6 +9,7 @@ AudioIntroDetector fingerprint backend on a bounded Arabic/English sample.
 import argparse
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -158,12 +159,37 @@ def is_existing_video(path):
     return path and os.path.exists(path) and os.path.isfile(path)
 
 
+def load_sample_titles(args):
+    titles = []
+    if args.show_title:
+        titles.extend(args.show_title)
+    if args.sample_file:
+        with open(args.sample_file, 'r', encoding='utf-8') as handle:
+            for line in handle:
+                title = line.strip()
+                if title and not title.startswith('#'):
+                    titles.append(title)
+    return [title.strip().casefold() for title in titles if title.strip()]
+
+
+def title_matches_sample(show, requested_titles):
+    if not requested_titles:
+        return True
+    title = show.get('title', '').strip().casefold()
+    return title in requested_titles
+
+
 def select_sample(args, mappings):
     shows = get_tvshows(args)
+    requested_titles = load_sample_titles(args)
+    if args.sample_strategy == 'random':
+        random.Random(args.seed).shuffle(shows)
     buckets = {language: [] for language in args.language}
     skipped = Counter()
 
     for show in shows:
+        if not title_matches_sample(show, requested_titles):
+            continue
         preliminary_bucket = show_language_bucket(show)
         if preliminary_bucket not in buckets:
             skipped['unclassified_language'] += 1
@@ -234,7 +260,61 @@ def sanitize_detection_result(detected):
             dict(item, file=sanitize_probe_path(item.get('file')))
             for item in sanitized['episode_detections']
         ]
+    if 'outro_detections' in sanitized:
+        sanitized['outro_detections'] = [
+            dict(item, file=sanitize_probe_path(item.get('file')))
+            for item in sanitized['outro_detections']
+        ]
     return sanitized
+
+
+def sanitize_diagnostics(diagnostics):
+    if not diagnostics:
+        return diagnostics
+
+    def sanitize_value(value):
+        if isinstance(value, dict):
+            sanitized = {}
+            for key, item in value.items():
+                if key in ('file', 'left_file', 'right_file', 'mapped_file'):
+                    sanitized[key] = sanitize_probe_path(item)
+                else:
+                    sanitized[key] = sanitize_value(item)
+            return sanitized
+        if isinstance(value, list):
+            return [sanitize_value(item) for item in value]
+        return value
+
+    return sanitize_value(diagnostics)
+
+
+def load_ground_truth(args):
+    if not args.ground_truth:
+        return {}
+    with open(args.ground_truth, 'r', encoding='utf-8') as handle:
+        data = json.load(handle)
+    return {str(title).casefold(): value for title, value in data.items()}
+
+
+def ground_truth_for_show(show, ground_truth):
+    return ground_truth.get(show['title'].strip().casefold())
+
+
+def detection_accuracy(detected, ground_truth, tolerance):
+    if not detected or not ground_truth:
+        return None
+    start = ground_truth.get('intro_start_time')
+    end = ground_truth.get('intro_end_time')
+    if start is None or end is None:
+        return None
+    start_delta = float(detected.get('intro_start_time', 0)) - float(start)
+    end_delta = float(detected.get('intro_end_time', 0)) - float(end)
+    return {
+        'start_delta': round(start_delta, 3),
+        'end_delta': round(end_delta, 3),
+        'within_tolerance': abs(start_delta) <= tolerance and abs(end_delta) <= tolerance,
+        'tolerance_seconds': tolerance,
+    }
 
 
 def run_detection(args, sample):
@@ -253,29 +333,43 @@ def run_detection(args, sample):
     if args.skip_outro:
         detector._detect_outro_by_fingerprint = lambda analyzed, ffmpeg: None
     files = [episode['mapped_file'] for episode in sample['episodes']]
+    diagnostics = {} if args.include_diagnostics else None
     start = time.time()
     try:
-        detected = detector.detect_show_intro(files)
+        detected = detector.detect_show_intro(files, diagnostics=diagnostics)
     except Exception as error:
-        return {
+        result = {
             'status': 'error',
             'failure_reason': classify_failure(error),
             'error': str(error),
             'elapsed_seconds': round(time.time() - start, 3),
         }
+        if diagnostics is not None:
+            result['diagnostics'] = sanitize_diagnostics(diagnostics)
+        return result
 
     if not detected:
-        return {
+        result = {
             'status': 'miss',
-            'failure_reason': 'no_common_fingerprint_match',
+            'failure_reason': (
+                diagnostics.get('failure_reason')
+                if diagnostics and diagnostics.get('failure_reason')
+                else 'no_common_fingerprint_match'
+            ),
             'elapsed_seconds': round(time.time() - start, 3),
         }
+        if diagnostics is not None:
+            result['diagnostics'] = sanitize_diagnostics(diagnostics)
+        return result
 
-    return {
+    result = {
         'status': 'hit',
         'detected': sanitize_detection_result(detected),
         'elapsed_seconds': round(time.time() - start, 3),
     }
+    if diagnostics is not None:
+        result['diagnostics'] = sanitize_diagnostics(diagnostics)
+    return result
 
 
 def summarize(results, languages):
@@ -318,6 +412,10 @@ def main(argv):
         help='source=target path mapping, e.g. smb://nas/share/=/mnt/share/',
     )
     parser.add_argument('--language', action='append', choices=('arabic', 'english'))
+    parser.add_argument('--sample-strategy', choices=('alphabetical', 'random', 'from-file'), default='alphabetical')
+    parser.add_argument('--seed', type=int, default=1)
+    parser.add_argument('--sample-file', help='UTF-8 file containing one show title per line')
+    parser.add_argument('--show-title', action='append', help='Exact show title to include; can be repeated')
     parser.add_argument('--shows-per-language', type=int, default=3)
     parser.add_argument('--episodes-per-show', type=int, default=3)
     parser.add_argument('--max-detector-episodes', type=int, default=None)
@@ -330,16 +428,22 @@ def main(argv):
     parser.add_argument('--ffmpeg', default=shutil.which('ffmpeg') or 'ffmpeg')
     parser.add_argument('--ffmpeg-timeout-seconds', type=int, default=180)
     parser.add_argument('--skip-outro', action='store_true', help='Probe intro success without tail/outro scanning')
+    parser.add_argument('--include-diagnostics', action='store_true', help='Include detector candidate diagnostics')
+    parser.add_argument('--ground-truth', help='JSON file mapping show titles to intro_start_time/intro_end_time')
+    parser.add_argument('--ground-truth-tolerance', type=float, default=5.0)
     parser.add_argument('--output', help='Write JSON results to this path instead of stdout')
     args = parser.parse_args(argv)
     if not args.language:
         args.language = ['arabic', 'english']
     args.language = list(dict.fromkeys(args.language))
+    if args.sample_strategy == 'from-file' and not args.sample_file:
+        parser.error('--sample-strategy from-file requires --sample-file')
 
     install_kodi_mocks()
     sys.path.insert(0, REPO_ROOT)
 
     mappings = parse_path_mappings(args.path_map)
+    ground_truth = load_ground_truth(args)
     sample, skipped, scanned_shows = select_sample(args, mappings)
     selected = []
     for language in args.language:
@@ -348,6 +452,7 @@ def main(argv):
     results = []
     for show in selected:
         outcome = run_detection(args, show)
+        truth = ground_truth_for_show(show, ground_truth)
         result = {
             'bucket': show['bucket'],
             'tvshowid': show['tvshowid'],
@@ -366,6 +471,13 @@ def main(argv):
             ],
         }
         result.update(outcome)
+        if truth:
+            result['ground_truth'] = truth
+            result['accuracy'] = detection_accuracy(
+                result.get('detected'),
+                truth,
+                args.ground_truth_tolerance
+            )
         results.append(result)
 
     payload = {
@@ -380,6 +492,13 @@ def main(argv):
             'ffmpeg_timeout_seconds': args.ffmpeg_timeout_seconds,
             'skip_outro': args.skip_outro,
             'languages': args.language,
+            'sample_strategy': args.sample_strategy,
+            'seed': args.seed,
+            'sample_file': args.sample_file,
+            'show_titles': args.show_title or [],
+            'include_diagnostics': args.include_diagnostics,
+            'ground_truth': args.ground_truth,
+            'ground_truth_tolerance': args.ground_truth_tolerance,
             'path_mappings': mappings,
         },
         'scanned_show_count': scanned_shows,
