@@ -24,7 +24,7 @@ DEFAULT_MIN_SPEECH_SECONDS = 12
 DEFAULT_EPISODE_TOLERANCE_SECONDS = 25
 DEFAULT_FINGERPRINT_SAMPLE_RATE = 8000
 DEFAULT_FINGERPRINT_WINDOW_SECONDS = 2
-DEFAULT_FINGERPRINT_MIN_COMMON_SECONDS = 90
+DEFAULT_FINGERPRINT_MIN_COMMON_SECONDS = 30
 DEFAULT_FINGERPRINT_MIN_OUTRO_SECONDS = 30
 DEFAULT_FINGERPRINT_HAMMING_DISTANCE = 16
 DEFAULT_INTRO_LIMIT_RATIO = 1.0 / 3.0
@@ -163,6 +163,7 @@ class AudioIntroDetector:
             return None
 
         best = None
+        best_rejected = None
         for left_index in range(len(analyzed)):
             for right_index in range(left_index + 1, len(analyzed)):
                 pair_match = self._find_common_fingerprint_run(
@@ -176,6 +177,8 @@ class AudioIntroDetector:
 
                 duration = pair_match['duration']
                 if duration < self.fingerprint_min_common_seconds:
+                    if self._is_better_fingerprint_match(pair_match, best_rejected):
+                        best_rejected = dict(pair_match)
                     continue
 
                 if self._is_better_fingerprint_match(pair_match, best):
@@ -184,6 +187,13 @@ class AudioIntroDetector:
                     best['right_file'] = analyzed[right_index]['file']
 
         if not best:
+            if best_rejected:
+                xbmc.log(
+                    'SkipIntro: Audio fingerprint found common audio '
+                    f'({best_rejected["duration"]:.1f}s) shorter than minimum '
+                    f'{self.fingerprint_min_common_seconds:.1f}s',
+                    xbmc.LOGINFO
+                )
             return None
 
         detections = [

@@ -1,4 +1,5 @@
 import json
+import re
 import xbmc
 import xbmcvfs
 from typing import List, Dict, Union, Optional
@@ -12,11 +13,21 @@ except ImportError:
     xbmc.log('SkipIntro: enzyme library not available', xbmc.LOGWARNING)
 
 # Chapter name patterns for autodetect (case-insensitive)
-INTRO_START_NAMES = ['intro', 'opening', 'op ', 'op.']
+INTRO_START_NAMES = [
+    'intro',
+    'opening',
+    'op',
+    'opening credits',
+    'opening theme',
+    'title sequence',
+    'main title',
+    'theme song',
+]
 INTRO_END_NAMES = ['intro end', 'intro over', 'after intro', 'post-intro',
-                   'episode start', 'main content', 'act 1']
+                   'opening end', 'end opening', 'episode start',
+                   'main content', 'act 1']
 OUTRO_START_NAMES = ['credits', 'end credits', 'ending', 'outro',
-                     'credits starting']
+                     'credits starting', 'ed', 'ending theme']
 
 
 class ChapterManager:
@@ -194,11 +205,7 @@ class ChapterManager:
             }
         Returns None if no intro pattern is detected.
         """
-        if not chapters or len(chapters) < 2:
-            return None
-
-        # Only works with named chapters (enzyme provides these)
-        if not any(ch.get('time') is not None for ch in chapters):
+        if not chapters:
             return None
 
         intro_start = None
@@ -210,18 +217,19 @@ class ChapterManager:
             if not name:
                 continue
 
+            is_intro_end = self._matches_any(name, INTRO_END_NAMES)
+            is_intro_start = self._matches_any(name, INTRO_START_NAMES) and not is_intro_end
+
             # Look for intro end first (most reliable signal)
-            if not intro_end and self._matches_any(name, INTRO_END_NAMES):
+            if not intro_end and is_intro_end:
                 intro_end = ch
 
             # Look for intro start
-            if not intro_start and self._matches_any(name, INTRO_START_NAMES):
-                # "Intro End" also matches "intro" — skip if it's actually the end
-                if not self._matches_any(name, INTRO_END_NAMES):
-                    intro_start = ch
+            if not intro_start and is_intro_start:
+                intro_start = ch
 
-            # Look for outro/credits
-            if not outro_start and self._matches_any(name, OUTRO_START_NAMES):
+            # Look for outro/credits. "Opening Credits" should stay intro-only.
+            if not outro_start and not is_intro_start and self._matches_any(name, OUTRO_START_NAMES):
                 outro_start = ch
 
         # Build result
@@ -268,14 +276,35 @@ class ChapterManager:
                 }
                 xbmc.log(f'SkipIntro: Autodetected intro (by next chapter): chapters {result["intro_start_chapter"]}→{result["intro_end_chapter"]}', xbmc.LOGINFO)
                 return result
+            if intro_start.get('end_time') is not None:
+                result = {
+                    'intro_start_chapter': intro_start['number'],
+                    'intro_start_time': intro_start.get('time'),
+                    'intro_end_chapter': intro_start['number'],
+                    'intro_end_time': intro_start.get('end_time'),
+                    'outro_start_chapter': outro_start['number'] if outro_start else None,
+                    'outro_start_time': outro_start.get('time') if outro_start else None,
+                    'source': 'autodetect'
+                }
+                xbmc.log(f'SkipIntro: Autodetected intro (by chapter end time): chapter {result["intro_start_chapter"]}', xbmc.LOGINFO)
+                return result
 
         return None
 
     @staticmethod
     def _matches_any(text: str, patterns: List[str]) -> bool:
         """Check if text matches any of the patterns (case-insensitive)."""
+        normalized = re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()
+        tokens = set(normalized.split())
         for pattern in patterns:
-            if pattern in text:
+            normalized_pattern = re.sub(r'[^a-z0-9]+', ' ', pattern.lower()).strip()
+            if not normalized_pattern:
+                continue
+            if len(normalized_pattern) <= 3:
+                if normalized_pattern in tokens:
+                    return True
+                continue
+            if f' {normalized_pattern} ' in f' {normalized} ':
                 return True
         return False
 

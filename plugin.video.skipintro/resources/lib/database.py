@@ -90,6 +90,7 @@ class ShowDatabase:
                     'use_chapters': 'BOOLEAN DEFAULT 0',
                     'intro_start_chapter': 'INTEGER',
                     'intro_end_chapter': 'INTEGER',
+                    'outro_start_chapter': 'INTEGER',
                     'intro_duration': 'INTEGER',
                     'intro_start_time': 'REAL',
                     'intro_end_time': 'REAL',
@@ -105,6 +106,7 @@ class ShowDatabase:
                     'episode': 'INTEGER',
                     'intro_start_chapter': 'INTEGER',
                     'intro_end_chapter': 'INTEGER',
+                    'outro_start_chapter': 'INTEGER',
                     'intro_start_time': 'REAL',
                     'intro_end_time': 'REAL',
                     'outro_start_time': 'REAL',
@@ -147,8 +149,11 @@ class ShowDatabase:
                     if not col_name.replace('_', '').isalnum():
                         xbmc.log(f'SkipIntro: Invalid column name: {col_name}', xbmc.LOGERROR)
                         continue
+                    alter_col_type = col_type
+                    if 'DEFAULT CURRENT_TIMESTAMP' in col_type.upper():
+                        alter_col_type = col_type.rsplit(' DEFAULT ', 1)[0]
                     # ALTER TABLE doesn't support parameters, but we've validated the inputs
-                    cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}")
+                    cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {alter_col_type}")
                     xbmc.log(f'SkipIntro: Added column {col_name} to {table_name}', xbmc.LOGINFO)
         else:
             # Create the table if it doesn't exist
@@ -178,7 +183,7 @@ class ShowDatabase:
             try:
                 c = conn.cursor()
                 c.execute('''
-                    SELECT use_chapters, intro_start_chapter, intro_end_chapter, intro_duration,
+                    SELECT use_chapters, intro_start_chapter, intro_end_chapter, outro_start_chapter, intro_duration,
                            intro_start_time, intro_end_time, outro_start_time
                     FROM shows_config
                     WHERE show_id = ?
@@ -190,10 +195,11 @@ class ShowDatabase:
                         'use_chapters': bool(result[0]),
                         'intro_start_chapter': result[1],
                         'intro_end_chapter': result[2],
-                        'intro_duration': result[3],
-                        'intro_start_time': result[4],
-                        'intro_end_time': result[5],
-                        'outro_start_time': result[6]
+                        'outro_start_chapter': result[3],
+                        'intro_duration': result[4],
+                        'intro_start_time': result[5],
+                        'intro_end_time': result[6],
+                        'outro_start_time': result[7]
                     }
                     xbmc.log(f'SkipIntro: Found show config: {config}', xbmc.LOGINFO)
                     return config
@@ -215,14 +221,15 @@ class ShowDatabase:
                 c = conn.cursor()
                 c.execute('''
                     INSERT OR REPLACE INTO shows_config
-                    (show_id, use_chapters, intro_start_chapter, intro_end_chapter, intro_duration,
+                    (show_id, use_chapters, intro_start_chapter, intro_end_chapter, outro_start_chapter, intro_duration,
                      intro_start_time, intro_end_time, outro_start_time)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     show_id,
                     config.get('use_chapters', False),
                     config.get('intro_start_chapter'),
                     config.get('intro_end_chapter'),
+                    config.get('outro_start_chapter'),
                     config.get('intro_duration'),
                     config.get('intro_start_time'),
                     config.get('intro_end_time'),
@@ -320,15 +327,16 @@ class ShowDatabase:
                 c = conn.cursor()
                 c.execute('''
                     INSERT OR REPLACE INTO episodes
-                    (show_id, season, episode, intro_start_chapter, intro_end_chapter,
+                    (show_id, season, episode, intro_start_chapter, intro_end_chapter, outro_start_chapter,
                      intro_start_time, intro_end_time, outro_start_time, source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     show_id,
                     season,
                     episode,
                     times.get('intro_start_chapter'),
                     times.get('intro_end_chapter'),
+                    times.get('outro_start_chapter'),
                     times.get('intro_start_time'),
                     times.get('intro_end_time'),
                     times.get('outro_start_time'),
@@ -352,7 +360,7 @@ class ShowDatabase:
             try:
                 c = conn.cursor()
                 c.execute('''
-                    SELECT intro_start_chapter, intro_end_chapter,
+                    SELECT intro_start_chapter, intro_end_chapter, outro_start_chapter,
                            intro_start_time, intro_end_time, outro_start_time, source
                     FROM episodes
                     WHERE show_id = ? AND season = ? AND episode = ?
@@ -366,10 +374,11 @@ class ShowDatabase:
                     'use_chapters': result[0] is not None or result[1] is not None,
                     'intro_start_chapter': result[0],
                     'intro_end_chapter': result[1],
-                    'intro_start_time': result[2],
-                    'intro_end_time': result[3],
-                    'outro_start_time': result[4],
-                    'source': result[5]
+                    'outro_start_chapter': result[2],
+                    'intro_start_time': result[3],
+                    'intro_end_time': result[4],
+                    'outro_start_time': result[5],
+                    'source': result[6]
                 }
                 xbmc.log(f'SkipIntro: Found episode times: {config}', xbmc.LOGINFO)
                 return config
@@ -392,7 +401,10 @@ class ShowDatabase:
                         'use_chapters': True,
                         'intro_start_chapter': config.get('intro_start_chapter'),
                         'intro_end_chapter': config.get('intro_end_chapter'),
-                        'outro_start_chapter': config.get('outro_start_chapter')
+                        'outro_start_chapter': config.get('outro_start_chapter'),
+                        'intro_start_time': config.get('intro_start_time'),
+                        'intro_end_time': config.get('intro_end_time'),
+                        'outro_start_time': config.get('outro_start_time')
                     }
                 else:
                     times = {

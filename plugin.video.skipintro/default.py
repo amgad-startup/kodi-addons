@@ -337,7 +337,9 @@ class SkipIntroPlayer(xbmc.Player):
         """Set time-based markers"""
         self.intro_start = times.get('intro_start_time')
         self.intro_bookmark = times.get('intro_end_time')
-        if self.intro_start is not None and self.intro_bookmark is not None:
+        if self.intro_bookmark is not None:
+            if self.intro_start is None:
+                self.intro_start = 0
             self.intro_duration = self.intro_bookmark - self.intro_start
             xbmc.log(f'SkipIntro: Using {source_desc} time-based markers - start: {self.intro_start}, end: {self.intro_bookmark}', xbmc.LOGINFO)
             self.outro_bookmark = times.get('outro_start_time')
@@ -349,6 +351,9 @@ class SkipIntroPlayer(xbmc.Player):
         """Set chapter-based markers"""
         chapters = self.getChapters()
         if not chapters:
+            if config.get('intro_end_time') is not None:
+                xbmc.log('SkipIntro: No chapters found; using saved chapter config timestamps', xbmc.LOGINFO)
+                return self.set_time_based_markers(config, "saved chapter config timestamps")
             xbmc.log('SkipIntro: No chapters found for chapter-based markers', xbmc.LOGWARNING)
             return False
 
@@ -567,21 +572,7 @@ class SkipIntroPlayer(xbmc.Player):
 
                 xbmc.log(f'SkipIntro: Autodetect set markers — intro: {self.intro_start:.1f}→{self.intro_bookmark:.1f}s', xbmc.LOGINFO)
 
-                # Save to DB so future plays skip immediately
-                if self.db and self.show_info:
-                    show_id = self.db.get_show(self.show_info['title'])
-                    if show_id:
-                        config = {
-                            'use_chapters': True,
-                            'intro_start_chapter': detected.get('intro_start_chapter'),
-                            'intro_end_chapter': detected.get('intro_end_chapter'),
-                            'outro_start_chapter': detected.get('outro_start_chapter'),
-                            'intro_start_time': intro_start_time,
-                            'intro_end_time': intro_end_time,
-                            'outro_start_time': detected.get('outro_start_time'),
-                        }
-                        self.db.save_show_config(show_id, config)
-                        xbmc.log(f'SkipIntro: Autodetect saved config for {self.show_info["title"]}', xbmc.LOGINFO)
+                self._save_autodetected_chapter_config(detected)
             else:
                 # No timestamps — use chapter-seek mode
                 self._skip_to_chapter = detected.get('intro_end_chapter')
@@ -590,9 +581,31 @@ class SkipIntroPlayer(xbmc.Player):
                 self.intro_duration = None
                 self.show_from_start = True
                 xbmc.log(f'SkipIntro: Autodetect using chapter-seek to chapter {self._skip_to_chapter}', xbmc.LOGINFO)
+                self._save_autodetected_chapter_config(detected)
 
         except Exception as e:
             xbmc.log(f'SkipIntro: Autodetect error: {str(e)}', xbmc.LOGERROR)
+
+    def _save_autodetected_chapter_config(self, detected):
+        """Persist chapter autodetect results so later plays do not rescan."""
+        if not self.db or not self.show_info:
+            return
+
+        show_id = self.db.get_show(self.show_info['title'])
+        if not show_id:
+            return
+
+        config = {
+            'use_chapters': True,
+            'intro_start_chapter': detected.get('intro_start_chapter'),
+            'intro_end_chapter': detected.get('intro_end_chapter'),
+            'outro_start_chapter': detected.get('outro_start_chapter'),
+            'intro_start_time': detected.get('intro_start_time'),
+            'intro_end_time': detected.get('intro_end_time'),
+            'outro_start_time': detected.get('outro_start_time'),
+        }
+        self.db.save_show_config(show_id, config)
+        xbmc.log(f'SkipIntro: Autodetect saved config for {self.show_info["title"]}', xbmc.LOGINFO)
 
     def find_intro_chapter(self, chapters):
         chapter_manager = ChapterManager()

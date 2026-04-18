@@ -208,6 +208,7 @@ class TestDatabase(unittest.TestCase):
         self.assertTrue(config['use_chapters'])
         self.assertEqual(config['intro_start_chapter'], 1)
         self.assertEqual(config['intro_end_chapter'], 3)
+        self.assertEqual(config['outro_start_chapter'], 8)
 
     def test_show_title_strip(self):
         """Test that show titles are stripped of whitespace"""
@@ -332,6 +333,16 @@ class TestSkipIntro(unittest.TestCase):
         self.player.set_time_based_markers(times, "test")
         self.assertTrue(self.player.show_from_start)
 
+    def test_set_time_based_markers_defaults_missing_start_to_zero(self):
+        """Legacy/imported time configs with only an end time start at video start"""
+        times = {'intro_start_time': None, 'intro_end_time': 90, 'outro_start_time': None}
+        result = self.player.set_time_based_markers(times, "test")
+        self.assertTrue(result)
+        self.assertEqual(self.player.intro_start, 0)
+        self.assertEqual(self.player.intro_bookmark, 90)
+        self.assertEqual(self.player.intro_duration, 90)
+        self.assertTrue(self.player.show_from_start)
+
     def test_set_time_based_markers_returns_false_when_none(self):
         """Returns False when intro times are None"""
         self.assertFalse(self.player.set_time_based_markers(
@@ -403,6 +414,24 @@ class TestSkipIntro(unittest.TestCase):
         config = {'intro_start_chapter': 1, 'intro_end_chapter': 2}
         self.assertFalse(self.player.set_chapter_based_markers(config))
 
+    def test_set_chapter_based_markers_uses_saved_times_when_chapters_missing(self):
+        """Autodetected chapter configs can fall back to saved timestamps"""
+        self.player.getChapters = MagicMock(return_value=[])
+        config = {
+            'intro_start_chapter': 2,
+            'intro_end_chapter': 3,
+            'intro_start_time': 42,
+            'intro_end_time': 88,
+            'outro_start_time': 1200,
+        }
+
+        result = self.player.set_chapter_based_markers(config)
+
+        self.assertTrue(result)
+        self.assertEqual(self.player.intro_start, 42)
+        self.assertEqual(self.player.intro_bookmark, 88)
+        self.assertEqual(self.player.outro_bookmark, 1200)
+
     def test_set_chapter_based_markers_missing_config(self):
         """Returns False when chapter config is missing"""
         chapters = [{'time': 0, 'number': 1}, {'time': 100, 'number': 2}]
@@ -472,6 +501,70 @@ class TestSkipIntro(unittest.TestCase):
         self.assertEqual(self.player.intro_bookmark, 157)
         self.assertEqual(self.player.intro_start, 112)  # 157 - 45
         self.assertEqual(self.player.intro_duration, 45)
+
+    def test_try_autodetect_sets_runtime_markers_and_saves_config(self):
+        """Playback autodetect sets markers and persists chapter config"""
+        chapters = [
+            {'name': 'Start', 'time': 0, 'number': 1},
+            {'name': 'Intro', 'time': 112, 'number': 2},
+            {'name': 'Intro End', 'time': 157, 'number': 3},
+            {'name': 'Credits Starting', 'time': 1352, 'number': 4},
+        ]
+        self.player.show_info = {'title': 'Autodetect Show', 'season': 1, 'episode': 1}
+        self.player.getChapters = MagicMock(return_value=chapters)
+        show_id = self.player.db.get_show('Autodetect Show')
+
+        self.player._try_autodetect()
+
+        self.assertEqual(self.player.intro_start, 112)
+        self.assertEqual(self.player.intro_bookmark, 157)
+        self.assertEqual(self.player.intro_duration, 45)
+        self.assertEqual(self.player.outro_bookmark, 1352)
+        config = self.player.db.get_show_config(show_id)
+        self.assertTrue(config['use_chapters'])
+        self.assertEqual(config['intro_start_chapter'], 2)
+        self.assertEqual(config['intro_end_chapter'], 3)
+        self.assertEqual(config['outro_start_chapter'], 4)
+        self.assertEqual(config['intro_start_time'], 112)
+        self.assertEqual(config['intro_end_time'], 157)
+
+    def test_try_autodetect_without_timestamps_uses_chapter_seek_and_saves(self):
+        """Named chapters without timestamps still produce chapter-seek config"""
+        chapters = [
+            {'name': 'Chapter 1', 'number': 1},
+            {'name': 'OP', 'number': 2},
+            {'name': 'Episode Start', 'number': 3},
+        ]
+        self.player.show_info = {'title': 'No Timestamp Show', 'season': 1, 'episode': 1}
+        self.player.getChapters = MagicMock(return_value=chapters)
+        show_id = self.player.db.get_show('No Timestamp Show')
+
+        self.player._try_autodetect()
+
+        self.assertEqual(self.player._skip_to_chapter, 3)
+        self.assertEqual(self.player.intro_start, 0)
+        self.assertEqual(self.player.intro_bookmark, 99999)
+        self.assertTrue(self.player.show_from_start)
+        config = self.player.db.get_show_config(show_id)
+        self.assertTrue(config['use_chapters'])
+        self.assertEqual(config['intro_start_chapter'], 2)
+        self.assertEqual(config['intro_end_chapter'], 3)
+        self.assertIsNone(config['intro_end_time'])
+
+    def test_try_autodetect_no_match_does_not_mutate(self):
+        """Generic named chapters are ignored by playback autodetect"""
+        chapters = [
+            {'name': 'Chapter 1', 'time': 0, 'number': 1},
+            {'name': 'Chapter 2', 'time': 90, 'number': 2},
+        ]
+        self.player.show_info = {'title': 'No Match Show', 'season': 1, 'episode': 1}
+        self.player.getChapters = MagicMock(return_value=chapters)
+
+        self.player._try_autodetect()
+
+        self.assertIsNone(self.player.intro_start)
+        self.assertIsNone(self.player.intro_bookmark)
+        self.assertIsNone(self.player._skip_to_chapter)
 
 class TestSkipDialog(unittest.TestCase):
     """Tests for skip button display logic and actual skip execution"""
@@ -794,6 +887,47 @@ class TestChapterManager(unittest.TestCase):
         self.assertEqual(result['intro_end_chapter'], 3)
         self.assertEqual(result['intro_end_time'], 90)
 
+    def test_autodetect_intro_matches_short_op_name_without_timestamps(self):
+        """Anime-style OP/episode-start chapters can use chapter-seek mode"""
+        chapters = [
+            {'name': 'Chapter 1', 'number': 1},
+            {'name': 'OP', 'number': 2},
+            {'name': 'Episode Start', 'number': 3},
+        ]
+        result = self.mgr.autodetect_intro(chapters)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['intro_start_chapter'], 2)
+        self.assertEqual(result['intro_end_chapter'], 3)
+        self.assertIsNone(result['intro_start_time'])
+        self.assertIsNone(result['intro_end_time'])
+
+    def test_autodetect_opening_credits_is_not_outro(self):
+        """Opening Credits should be classified as intro, not end credits"""
+        chapters = [
+            {'name': 'Opening Credits', 'time': 0, 'number': 1},
+            {'name': 'Act 1', 'time': 65, 'number': 2},
+            {'name': 'End Credits', 'time': 1400, 'number': 3},
+        ]
+        result = self.mgr.autodetect_intro(chapters)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['intro_start_chapter'], 1)
+        self.assertEqual(result['intro_end_chapter'], 2)
+        self.assertEqual(result['outro_start_chapter'], 3)
+
+    def test_autodetect_intro_uses_chapter_end_time_without_next_chapter(self):
+        """A named intro chapter can use its own end_time as the boundary"""
+        chapters = [
+            {'name': 'OP', 'time': 20, 'end_time': 80, 'number': 1},
+        ]
+        result = self.mgr.autodetect_intro(chapters)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['intro_start_chapter'], 1)
+        self.assertEqual(result['intro_end_chapter'], 1)
+        self.assertEqual(result['intro_end_time'], 80)
+
 
 class TestAudioIntroDetector(unittest.TestCase):
     """Tests for music-to-dialogue audio intro detection"""
@@ -883,6 +1017,33 @@ class TestAudioIntroDetector(unittest.TestCase):
         self.assertEqual(result['intro_end_time'], 10)
         self.assertEqual(result['matching_episode_count'], 2)
         self.assertEqual(result['source'], 'audio_fingerprint')
+
+    def test_detect_show_intro_by_fingerprint_default_accepts_shorter_intro(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        common = [0x1000000000000000 + index for index in range(20)]
+
+        def fingerprints(values):
+            return [{'time': index * 2, 'hash': value, 'rms': 1000} for index, value in enumerate(values)]
+
+        detector = AudioIntroDetector(
+            backend='fingerprint',
+            fingerprint_window_seconds=2,
+            fingerprint_hamming_distance=0
+        )
+        detector._find_ffmpeg = MagicMock(return_value='ffmpeg')
+        detector._probe_duration = MagicMock(return_value=180)
+        detector._fingerprint_file = MagicMock(side_effect=[
+            fingerprints([0x1111111111111111] + common + [0x2222222222222222]),
+            fingerprints([0x3333333333333333] + common + [0x4444444444444444]),
+        ])
+
+        result = detector.detect_show_intro(['e1.mkv', 'e2.mkv'])
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['match_duration'], 40)
+        self.assertEqual(result['intro_start_time'], 2)
+        self.assertEqual(result['intro_end_time'], 42)
 
     def test_detect_show_intro_by_fingerprint_prefers_aligned_pair(self):
         from resources.lib.audio_intro import AudioIntroDetector
@@ -1475,6 +1636,90 @@ class TestContextModule(unittest.TestCase):
         fake_db.save_episode_times.assert_not_called()
 
 
+class TestDatabaseManager(unittest.TestCase):
+    """Tests for database management import/export behavior"""
+
+    def test_import_from_json_preserves_chapter_outro_columns(self):
+        from resources.lib.database import ShowDatabase
+        from resources.lib.database_manager import DatabaseManager
+
+        tmp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        tmp.close()
+        ShowDatabase(tmp.name).close()
+
+        import_data = {
+            'version': '1.0',
+            'shows': [
+                {
+                    'title': 'Imported Chapter Show',
+                    'config': {
+                        'use_chapters': True,
+                        'intro_start_chapter': 1,
+                        'intro_end_chapter': 3,
+                        'outro_start_chapter': 4,
+                        'intro_duration': 75,
+                        'intro_start_time': 42.0,
+                        'intro_end_time': 88.0,
+                        'outro_start_time': 1200.0,
+                    },
+                    'episodes': [
+                        {
+                            'season': 1,
+                            'episode': 2,
+                            'intro_start_chapter': 1,
+                            'intro_end_chapter': 3,
+                            'outro_start_chapter': 5,
+                            'source': 'test'
+                        }
+                    ]
+                }
+            ]
+        }
+
+        class FakeImportFile:
+            def size(self):
+                return len(json.dumps(import_data))
+
+            def read(self):
+                return json.dumps(import_data)
+
+            def close(self):
+                pass
+
+        dialog = MagicMock()
+        dialog.browse.return_value = 'smb://server/share/import.json'
+        dialog.select.return_value = 1
+        dialog.yesno.return_value = True
+
+        mgr = DatabaseManager.__new__(DatabaseManager)
+        mgr.addon = MockXBMCAddon.Addon()
+        mgr.addon.setSetting('backup_restore_path', 'special://userdata/addon_data/plugin.video.skipintro/')
+        mgr.addon_data_path = 'special://userdata/addon_data/plugin.video.skipintro/'
+        mgr.db_path = tmp.name
+
+        try:
+            with patch('resources.lib.database_manager.xbmcvfs.File', return_value=FakeImportFile()), \
+                    patch('resources.lib.database_manager.xbmcvfs.translatePath', side_effect=lambda p: p), \
+                    patch('resources.lib.database_manager.xbmcgui.Dialog', return_value=dialog):
+                self.assertTrue(mgr.import_from_json())
+
+            db = ShowDatabase(tmp.name)
+            try:
+                show_id = db.get_show('Imported Chapter Show')
+                config = db.get_show_config(show_id)
+                episode = db.get_episode_times(show_id, 1, 2)
+            finally:
+                db.close()
+        finally:
+            os.unlink(tmp.name)
+
+        self.assertEqual(config['outro_start_chapter'], 4)
+        self.assertEqual(config['intro_start_time'], 42.0)
+        self.assertEqual(config['intro_end_time'], 88.0)
+        self.assertEqual(config['outro_start_time'], 1200.0)
+        self.assertEqual(episode['outro_start_chapter'], 5)
+
+
 class TestDatabaseMigration(unittest.TestCase):
     """Tests for database schema creation and migration"""
 
@@ -1507,7 +1752,8 @@ class TestDatabaseMigration(unittest.TestCase):
             c.execute("PRAGMA table_info(shows_config)")
             columns = {row[1] for row in c.fetchall()}
         expected = {'show_id', 'use_chapters', 'intro_start_chapter', 'intro_end_chapter',
-                    'intro_duration', 'intro_start_time', 'intro_end_time', 'outro_start_time', 'created_at'}
+                    'outro_start_chapter', 'intro_duration', 'intro_start_time',
+                    'intro_end_time', 'outro_start_time', 'created_at'}
         self.assertTrue(expected.issubset(columns))
 
     def test_reinit_is_safe(self):
