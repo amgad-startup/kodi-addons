@@ -24,6 +24,7 @@ DEFAULT_MIN_SPEECH_SECONDS = 12
 DEFAULT_EPISODE_TOLERANCE_SECONDS = 25
 DEFAULT_FINGERPRINT_SAMPLE_RATE = 8000
 DEFAULT_FINGERPRINT_WINDOW_SECONDS = 2
+DEFAULT_FINGERPRINT_HOP_SECONDS = 1.0
 DEFAULT_FINGERPRINT_MIN_COMMON_SECONDS = 30
 DEFAULT_FINGERPRINT_MIN_OUTRO_SECONDS = 30
 DEFAULT_FINGERPRINT_HAMMING_DISTANCE = 16
@@ -61,6 +62,7 @@ class AudioIntroDetector:
         backend: str = 'segments',
         fingerprint_sample_rate: int = DEFAULT_FINGERPRINT_SAMPLE_RATE,
         fingerprint_window_seconds: int = DEFAULT_FINGERPRINT_WINDOW_SECONDS,
+        fingerprint_hop_seconds: float = DEFAULT_FINGERPRINT_HOP_SECONDS,
         fingerprint_min_common_seconds: int = DEFAULT_FINGERPRINT_MIN_COMMON_SECONDS,
         fingerprint_min_outro_seconds: int = DEFAULT_FINGERPRINT_MIN_OUTRO_SECONDS,
         fingerprint_hamming_distance: int = DEFAULT_FINGERPRINT_HAMMING_DISTANCE,
@@ -78,6 +80,7 @@ class AudioIntroDetector:
         self.backend = backend
         self.fingerprint_sample_rate = fingerprint_sample_rate
         self.fingerprint_window_seconds = fingerprint_window_seconds
+        self.fingerprint_hop_seconds = fingerprint_hop_seconds
         self.fingerprint_min_common_seconds = fingerprint_min_common_seconds
         self.fingerprint_min_outro_seconds = fingerprint_min_outro_seconds
         self.fingerprint_hamming_distance = fingerprint_hamming_distance
@@ -175,7 +178,7 @@ class AudioIntroDetector:
                 if not pair_match:
                     continue
 
-                duration = pair_match['duration']
+                duration = self._fingerprint_threshold_duration(pair_match)
                 if duration < self.fingerprint_min_common_seconds:
                     if self._is_better_fingerprint_match(pair_match, best_rejected):
                         best_rejected = dict(pair_match)
@@ -279,7 +282,7 @@ class AudioIntroDetector:
                 )
                 if not pair_match:
                     continue
-                if pair_match['duration'] < self.fingerprint_min_outro_seconds:
+                if self._fingerprint_threshold_duration(pair_match) < self.fingerprint_min_outro_seconds:
                     continue
                 if self._is_better_outro_match(pair_match, best):
                     best = dict(pair_match)
@@ -593,11 +596,12 @@ class AudioIntroDetector:
             samples.byteswap()
 
         window_size = int(self.fingerprint_sample_rate * self.fingerprint_window_seconds)
-        if window_size <= 0 or len(samples) < window_size:
+        hop_size = int(self.fingerprint_sample_rate * self.fingerprint_hop_seconds)
+        if window_size <= 0 or hop_size <= 0 or len(samples) < window_size:
             return []
 
         fingerprints = []
-        for start in range(0, len(samples) - window_size + 1, window_size):
+        for start in range(0, len(samples) - window_size + 1, hop_size):
             window = samples[start:start + window_size]
             fingerprint_hash, rms = self._fingerprint_window(window)
             fingerprints.append({
@@ -703,17 +707,39 @@ class AudioIntroDetector:
                 }
                 current_runs[right_index] = run
 
-                duration = length * self.fingerprint_window_seconds
                 left_start_index = left_index - length + 1
                 right_start_index = right_index - length + 1
+                left_hop = self._fingerprint_run_hop(left, left_start_index, left_index)
+                right_hop = self._fingerprint_run_hop(right, right_start_index, right_index)
+                edge_trim = max(0.0, float(self.fingerprint_window_seconds) - min(left_hop, right_hop))
+                left_start_time = left[left_start_index]['time'] + edge_trim
+                left_end_time = left[left_index]['time'] + left_hop
+                right_start_time = right[right_start_index]['time'] + edge_trim
+                right_end_time = right[right_index]['time'] + right_hop
+                duration = min(left_end_time - left_start_time, right_end_time - right_start_time)
+                raw_left_end_time = left[left_index]['time'] + self.fingerprint_window_seconds
+                raw_right_end_time = right[right_index]['time'] + self.fingerprint_window_seconds
+                raw_left_start_time = left[left_start_index]['time']
+                raw_right_start_time = right[right_start_index]['time']
+                raw_duration = min(
+                    raw_left_end_time - raw_left_start_time,
+                    raw_right_end_time - raw_right_start_time
+                )
+                if duration <= 0:
+                    continue
                 candidate = {
                     'duration': duration,
-                    'left_start_time': left[left_start_index]['time'],
-                    'left_end_time': left[left_index]['time'] + self.fingerprint_window_seconds,
-                    'right_start_time': right[right_start_index]['time'],
-                    'right_end_time': right[right_index]['time'] + self.fingerprint_window_seconds,
+                    'raw_duration': raw_duration,
+                    'left_start_time': left_start_time,
+                    'left_end_time': left_end_time,
+                    'raw_left_start_time': raw_left_start_time,
+                    'raw_left_end_time': raw_left_end_time,
+                    'right_start_time': right_start_time,
+                    'right_end_time': right_end_time,
+                    'raw_right_start_time': raw_right_start_time,
+                    'raw_right_end_time': raw_right_end_time,
                     'average_distance': distance_total / float(length),
-                    'start_spread': abs(left[left_start_index]['time'] - right[right_start_index]['time'])
+                    'start_spread': abs(left_start_time - right_start_time)
                 }
                 if not self._fingerprint_match_in_bounds(
                     candidate,
@@ -730,6 +756,17 @@ class AudioIntroDetector:
 
         return best
 
+    def _fingerprint_run_hop(self, fingerprints: List[Dict[str, float]], start_index: int, end_index: int) -> float:
+        for index in range(start_index + 1, end_index + 1):
+            delta = fingerprints[index]['time'] - fingerprints[index - 1]['time']
+            if delta > 0:
+                return float(delta)
+        return float(self.fingerprint_hop_seconds or self.fingerprint_window_seconds)
+
+    @staticmethod
+    def _fingerprint_threshold_duration(match: Dict[str, float]) -> float:
+        return float(max(match.get('duration', 0), match.get('raw_duration', 0)))
+
     @staticmethod
     def _fingerprint_match_in_bounds(
         match: Dict[str, float],
@@ -740,11 +777,19 @@ class AudioIntroDetector:
     ) -> bool:
         if left_min_start is not None and match['left_start_time'] < left_min_start:
             return False
+        if left_min_start is not None and match.get('raw_left_start_time', match['left_start_time']) < left_min_start:
+            return False
         if right_min_start is not None and match['right_start_time'] < right_min_start:
+            return False
+        if right_min_start is not None and match.get('raw_right_start_time', match['right_start_time']) < right_min_start:
             return False
         if left_max_end is not None and match['left_end_time'] > left_max_end:
             return False
+        if left_max_end is not None and match.get('raw_left_end_time', match['left_end_time']) > left_max_end:
+            return False
         if right_max_end is not None and match['right_end_time'] > right_max_end:
+            return False
+        if right_max_end is not None and match.get('raw_right_end_time', match['right_end_time']) > right_max_end:
             return False
         return True
 

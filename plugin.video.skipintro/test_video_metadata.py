@@ -3,6 +3,7 @@ import tempfile
 import os
 import json
 import subprocess
+import struct
 import warnings
 from unittest.mock import MagicMock, patch
 
@@ -1044,6 +1045,42 @@ class TestAudioIntroDetector(unittest.TestCase):
         self.assertEqual(result['match_duration'], 40)
         self.assertEqual(result['intro_start_time'], 2)
         self.assertEqual(result['intro_end_time'], 42)
+
+    def test_fingerprint_pcm_uses_configured_hop(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        detector = AudioIntroDetector(
+            fingerprint_sample_rate=4,
+            fingerprint_window_seconds=2,
+            fingerprint_hop_seconds=1
+        )
+        samples = [1000, -1000] * 8
+        pcm = struct.pack('<' + 'h' * len(samples), *samples)
+
+        fingerprints = detector._fingerprint_pcm(pcm, base_time=5)
+
+        self.assertEqual([item['time'] for item in fingerprints], [5.0, 6.0, 7.0])
+
+    def test_find_common_fingerprint_run_trims_overlapping_edges(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        common = [0x1000000000000000 + index for index in range(3)]
+        left = [{'time': 10 + index, 'hash': value, 'rms': 1000} for index, value in enumerate(common)]
+        right = [{'time': 20 + index, 'hash': value, 'rms': 1000} for index, value in enumerate(common)]
+        detector = AudioIntroDetector(
+            fingerprint_window_seconds=2,
+            fingerprint_hop_seconds=1,
+            fingerprint_hamming_distance=0
+        )
+
+        match = detector._find_common_fingerprint_run(left, right)
+
+        self.assertEqual(match['left_start_time'], 11)
+        self.assertEqual(match['left_end_time'], 13)
+        self.assertEqual(match['right_start_time'], 21)
+        self.assertEqual(match['right_end_time'], 23)
+        self.assertEqual(match['duration'], 2)
+        self.assertEqual(match['raw_duration'], 4)
 
     def test_detect_show_intro_by_fingerprint_prefers_aligned_pair(self):
         from resources.lib.audio_intro import AudioIntroDetector
