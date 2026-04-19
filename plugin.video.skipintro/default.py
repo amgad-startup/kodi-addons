@@ -736,7 +736,8 @@ class SkipIntroPlayer(xbmc.Player):
         try:
             detector = AudioIntroDetector(
                 backend='fingerprint',
-                max_scan_seconds=AUDIO_DETECTION_INITIAL_SCAN_SECONDS
+                max_scan_seconds=AUDIO_DETECTION_INITIAL_SCAN_SECONDS,
+                detect_outro=False
             )
             candidates = detector.find_episode_candidates(
                 selected_file,
@@ -756,13 +757,16 @@ class SkipIntroPlayer(xbmc.Player):
                 xbmc.LOGINFO
             )
             detected = detector.detect_show_intro(candidates)
+            detection_scan_seconds = AUDIO_DETECTION_INITIAL_SCAN_SECONDS
             if not detected:
                 xbmc.log(f'SkipIntro: Audio autodetect extending scan for {show_title}', xbmc.LOGINFO)
                 fallback_detector = AudioIntroDetector(
                     backend='fingerprint',
-                    max_scan_seconds=AUDIO_DETECTION_FALLBACK_SCAN_SECONDS
+                    max_scan_seconds=AUDIO_DETECTION_FALLBACK_SCAN_SECONDS,
+                    detect_outro=False
                 )
                 detected = fallback_detector.detect_show_intro(candidates)
+                detection_scan_seconds = AUDIO_DETECTION_FALLBACK_SCAN_SECONDS
 
             if not self._is_valid_audio_detection(detected):
                 xbmc.log(f'SkipIntro: Audio autodetect found no stable intro for {show_title}', xbmc.LOGINFO)
@@ -784,9 +788,19 @@ class SkipIntroPlayer(xbmc.Player):
                 xbmc.log(
                     f'SkipIntro: Audio autodetect saved config for {show_title}: '
                     f'intro {config.get("intro_start_time")}->{config.get("intro_end_time")}, '
-                    f'outro {config.get("outro_start_time")}, '
+                    f'outro pending, '
                     f'virtual_episode_markers={virtual_chapter_count}',
                     xbmc.LOGINFO
+                )
+                self._run_background_outro_detection(
+                    db,
+                    show_id,
+                    show_title,
+                    candidates,
+                    config,
+                    chapters=chapters,
+                    scan_seconds=detection_scan_seconds,
+                    selected_file=selected_file
                 )
                 return config
 
@@ -800,6 +814,66 @@ class SkipIntroPlayer(xbmc.Player):
             xbmc.log(f'SkipIntro: Audio autodetect error for {show_title}: {str(e)}', xbmc.LOGERROR)
             db.save_audio_detection_attempt(show_id, watched_count, 'error')
             return None
+
+    def _run_background_outro_detection(
+        self,
+        db,
+        show_id,
+        show_title,
+        candidates,
+        base_config,
+        chapters=None,
+        scan_seconds=AUDIO_DETECTION_INITIAL_SCAN_SECONDS,
+        selected_file=None
+    ):
+        """Detect outro after intro config is already saved."""
+        try:
+            xbmc.log(f'SkipIntro: Audio autodetect scanning outro in background for {show_title}', xbmc.LOGINFO)
+            detector = AudioIntroDetector(
+                backend='fingerprint',
+                max_scan_seconds=scan_seconds,
+                detect_outro=True
+            )
+            detected = detector.detect_show_intro(candidates)
+            outro_start = detected.get('outro_start_time') if detected else None
+            if outro_start is None:
+                xbmc.log(f'SkipIntro: Audio autodetect found no stable outro for {show_title}', xbmc.LOGINFO)
+                return None
+
+            existing_config = db.get_show_config(show_id) or base_config
+            updated_config = dict(existing_config)
+            updated_config['outro_start_time'] = outro_start
+            chapter_config = self._audio_detection_chapter_config(
+                updated_config.get('intro_start_time') or 0,
+                updated_config.get('intro_end_time'),
+                outro_start,
+                chapters=chapters
+            )
+            if chapter_config:
+                updated_config.update(chapter_config)
+
+            if db.save_show_config(show_id, updated_config):
+                virtual_chapter_count = 0
+                if not chapters and selected_file:
+                    episode_files = self._find_show_episode_files(selected_file, skip_first_episode=True)
+                    virtual_chapter_count = self._save_audio_detection_episode_markers(
+                        db,
+                        show_id,
+                        episode_files,
+                        updated_config,
+                        update_existing_audio_detection=True
+                    )
+                xbmc.log(
+                    f'SkipIntro: Audio autodetect saved background outro for {show_title}: '
+                    f'outro {outro_start}, virtual_episode_markers={virtual_chapter_count}',
+                    xbmc.LOGINFO
+                )
+                return updated_config
+        except AudioIntroDetectionError as e:
+            xbmc.log(f'SkipIntro: Audio outro autodetect unavailable for {show_title}: {str(e)}', xbmc.LOGWARNING)
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Audio outro autodetect error for {show_title}: {str(e)}', xbmc.LOGERROR)
+        return None
 
     @staticmethod
     def _find_show_episode_files(selected_file, skip_first_episode=False):
@@ -838,7 +912,14 @@ class SkipIntroPlayer(xbmc.Player):
             episode_files.append(selected_file)
         return episode_files
 
-    def _save_audio_detection_episode_markers(self, db, show_id, episode_files, config):
+    def _save_audio_detection_episode_markers(
+        self,
+        db,
+        show_id,
+        episode_files,
+        config,
+        update_existing_audio_detection=False
+    ):
         """Save audio-detected times as per-episode virtual chapter markers."""
         episode_markers = {
             'intro_start_time': config.get('intro_start_time'),
@@ -873,7 +954,8 @@ class SkipIntroPlayer(xbmc.Player):
                 existing.get('intro_end_time') is not None or
                 existing.get('intro_end_chapter') is not None
             ):
-                continue
+                if not update_existing_audio_detection or existing.get('source') != 'audio_detection':
+                    continue
 
             if db.save_episode_times(show_id, season, episode, episode_markers):
                 saved_count += 1

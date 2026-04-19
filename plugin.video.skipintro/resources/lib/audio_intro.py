@@ -69,6 +69,7 @@ class AudioIntroDetector:
         fingerprint_hamming_distance: int = DEFAULT_FINGERPRINT_HAMMING_DISTANCE,
         intro_limit_ratio: float = DEFAULT_INTRO_LIMIT_RATIO,
         outro_search_ratio: float = DEFAULT_OUTRO_SEARCH_RATIO,
+        detect_outro: bool = True,
         ffmpeg_timeout_seconds: int = DEFAULT_FFMPEG_TIMEOUT_SECONDS,
         segmenter_factory: Optional[Callable[[], Callable[[str], Iterable[Tuple[str, float, float]]]]] = None,
     ):
@@ -89,6 +90,7 @@ class AudioIntroDetector:
         self.fingerprint_hamming_distance = fingerprint_hamming_distance
         self.intro_limit_ratio = intro_limit_ratio
         self.outro_search_ratio = outro_search_ratio
+        self.detect_outro = detect_outro
         self.ffmpeg_timeout_seconds = ffmpeg_timeout_seconds
         self._segmenter_factory = segmenter_factory
         self._segmenter = None
@@ -163,6 +165,7 @@ class AudioIntroDetector:
                     'fingerprint_min_common_seconds': self.fingerprint_min_common_seconds,
                     'fingerprint_hamming_distance': self.fingerprint_hamming_distance,
                     'intro_limit_ratio': self.intro_limit_ratio,
+                    'detect_outro': self.detect_outro,
                 },
                 'episodes': [],
                 'pairs': [],
@@ -297,7 +300,7 @@ class AudioIntroDetector:
         ]
         start_times = sorted(d['intro_start_time'] for d in detections)
         end_times = sorted(d['intro_end_time'] for d in detections)
-        outro = self._detect_outro_by_fingerprint(analyzed, ffmpeg)
+        outro = self._detect_outro_by_fingerprint(analyzed, ffmpeg) if self.detect_outro else None
 
         result = {
             'intro_start_time': start_times[len(start_times) // 2],

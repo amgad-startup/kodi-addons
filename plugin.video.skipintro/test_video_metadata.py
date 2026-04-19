@@ -636,17 +636,17 @@ class TestSkipIntro(unittest.TestCase):
         self.assertEqual(self.player.db.get_audio_detection_episode_count(show_id), 2)
         self.player._start_audio_detection_thread.assert_not_called()
 
-    def test_run_audio_detection_saves_detected_intro_and_outro(self):
-        """Automatic audio detection saves show-level intro/outro config"""
+    def test_run_audio_detection_saves_intro_before_background_outro(self):
+        """Automatic audio detection saves intro before background outro scan"""
         title = f'Audio Hit Show {uuid.uuid4().hex}'
         show_id = self.player.db.get_show(title)
         self.player.getChapters = MagicMock(return_value=[])
+        self.player._run_background_outro_detection = MagicMock()
         initial_detector = MagicMock()
         initial_detector.find_episode_candidates.return_value = ['e2.mkv', 'e3.mkv']
         initial_detector.detect_show_intro.return_value = {
             'intro_start_time': 0,
             'intro_end_time': 88,
-            'outro_start_time': 2400,
         }
 
         with patch.object(default, 'AudioIntroDetector', return_value=initial_detector):
@@ -663,9 +663,10 @@ class TestSkipIntro(unittest.TestCase):
         self.assertFalse(config['use_chapters'])
         self.assertEqual(config['intro_start_time'], 0)
         self.assertEqual(config['intro_end_time'], 88)
-        self.assertEqual(config['outro_start_time'], 2400)
+        self.assertIsNone(config['outro_start_time'])
         attempt = self.player.db.get_audio_detection_attempt(show_id)
         self.assertEqual(attempt['status'], 'hit')
+        self.player._run_background_outro_detection.assert_called_once()
 
     def test_run_audio_detection_saves_virtual_markers_for_show_episodes_without_chapters(self):
         """Audio detection saves per-episode markers when media has no chapters"""
@@ -683,9 +684,9 @@ class TestSkipIntro(unittest.TestCase):
             detector.detect_show_intro.return_value = {
                 'intro_start_time': 3,
                 'intro_end_time': 77,
-                'outro_start_time': 1800,
             }
 
+            self.player._run_background_outro_detection = MagicMock()
             with patch.object(default, 'AudioIntroDetector', return_value=detector):
                 self.player._run_audio_detection_for_show(
                     self.player.db,
@@ -703,8 +704,66 @@ class TestSkipIntro(unittest.TestCase):
             self.assertFalse(config['use_chapters'])
             self.assertEqual(config['intro_start_time'], 3)
             self.assertEqual(config['intro_end_time'], 77)
-            self.assertEqual(config['outro_start_time'], 1800)
+            self.assertIsNone(config['outro_start_time'])
             self.assertEqual(config['source'], 'audio_detection')
+
+    def test_background_outro_detection_updates_show_and_virtual_markers(self):
+        """Background-only outro detection updates saved show and generated episode markers"""
+        title = f'Background Outro Show {uuid.uuid4().hex}'
+        show_id = self.player.db.get_show(title)
+        base_config = {
+            'use_chapters': False,
+            'intro_start_time': 0,
+            'intro_end_time': 80,
+            'outro_start_time': None,
+            'intro_start_chapter': None,
+            'intro_end_chapter': None,
+            'outro_start_chapter': None,
+        }
+        self.player.db.save_show_config(show_id, base_config)
+        self.player.db.save_episode_times(show_id, 1, 2, {
+            'intro_start_time': 0,
+            'intro_end_time': 80,
+            'outro_start_time': None,
+            'source': 'audio_detection'
+        })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            episode_paths = []
+            for episode in range(1, 4):
+                path = os.path.join(tmpdir, f'Background.Outro.Show.S01E{episode:02d}.mkv')
+                open(path, 'w').close()
+                episode_paths.append(path)
+
+            outro_detector = MagicMock()
+            outro_detector.detect_show_intro.return_value = {
+                'intro_start_time': 0,
+                'intro_end_time': 80,
+                'outro_start_time': 1800,
+            }
+
+            with patch.object(default, 'AudioIntroDetector', return_value=outro_detector) as detector_cls:
+                result = self.player._run_background_outro_detection(
+                    self.player.db,
+                    show_id,
+                    title,
+                    episode_paths[1:],
+                    base_config,
+                    chapters=[],
+                    scan_seconds=90,
+                    selected_file=episode_paths[1]
+                )
+
+        detector_cls.assert_called_once_with(
+            backend='fingerprint',
+            max_scan_seconds=90,
+            detect_outro=True
+        )
+        self.assertEqual(result['outro_start_time'], 1800)
+        show_config = self.player.db.get_show_config(show_id)
+        self.assertEqual(show_config['outro_start_time'], 1800)
+        episode_config = self.player.db.get_episode_times(show_id, 1, 2)
+        self.assertEqual(episode_config['outro_start_time'], 1800)
 
     def test_audio_virtual_markers_do_not_overwrite_existing_episode_config(self):
         """Automatic virtual markers preserve existing episode-specific config"""
@@ -1537,6 +1596,39 @@ class TestAudioIntroDetector(unittest.TestCase):
         self.assertEqual(result['outro_start_time'], 82)
         self.assertEqual(result['outro_match_duration'], 6)
 
+    def test_detect_show_intro_by_fingerprint_can_skip_outro(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        def fingerprints(values):
+            return [{'time': index * 2, 'hash': value, 'rms': 1000} for index, value in enumerate(values)]
+
+        intro = [
+            0xAAAAAAAAAAAAAAAA,
+            0xCCCCCCCCCCCCCCCC,
+            0xF0F0F0F0F0F0F0F0,
+            0x0F0F0F0F0F0F0F0F,
+        ]
+        detector = AudioIntroDetector(
+            backend='fingerprint',
+            fingerprint_window_seconds=2,
+            fingerprint_min_common_seconds=6,
+            fingerprint_hamming_distance=0,
+            detect_outro=False
+        )
+        detector._find_ffmpeg = MagicMock(return_value='ffmpeg')
+        detector._probe_duration = MagicMock(return_value=90)
+        detector._fingerprint_file = MagicMock(side_effect=[
+            fingerprints(intro),
+            fingerprints(intro),
+        ])
+        detector._detect_outro_by_fingerprint = MagicMock(return_value={'outro_start_time': 82})
+
+        result = detector.detect_show_intro(['e1.strm', 'e2.strm'])
+
+        self.assertEqual(result['intro_end_time'], 8)
+        self.assertIsNone(result['outro_start_time'])
+        detector._detect_outro_by_fingerprint.assert_not_called()
+
     def test_find_episode_candidates_uses_neighboring_video_files(self):
         from resources.lib.audio_intro import AudioIntroDetector
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1922,7 +2014,11 @@ class TestContextModule(unittest.TestCase):
         with patch.object(context, 'AudioIntroDetector', return_value=fake_detector) as detector_cls:
             result = context.get_audio_intro_detection(dialog, {'file': '/videos/e1.mkv'})
 
-        detector_cls.assert_called_once_with(backend='fingerprint', max_scan_seconds=90)
+        detector_cls.assert_called_once_with(
+            backend='fingerprint',
+            max_scan_seconds=90,
+            detect_outro=False
+        )
         self.assertEqual(result['intro_start_time'], 0)
         self.assertEqual(result['intro_end_time'], 263)
         self.assertEqual(result['source'], 'audio_detection')
@@ -1954,8 +2050,8 @@ class TestContextModule(unittest.TestCase):
         self.assertEqual(
             [call.kwargs for call in detector_cls.call_args_list],
             [
-                {'backend': 'fingerprint', 'max_scan_seconds': 90},
-                {'backend': 'fingerprint', 'max_scan_seconds': 180},
+                {'backend': 'fingerprint', 'max_scan_seconds': 90, 'detect_outro': False},
+                {'backend': 'fingerprint', 'max_scan_seconds': 180, 'detect_outro': False},
             ]
         )
         initial_detector.find_episode_candidates.assert_called_once_with(
@@ -1967,7 +2063,7 @@ class TestContextModule(unittest.TestCase):
         self.assertEqual(result['intro_start_time'], 114)
         self.assertEqual(result['intro_end_time'], 150)
 
-    def test_get_audio_intro_detection_includes_outro(self):
+    def test_get_audio_intro_detection_skips_foreground_outro(self):
         import context
 
         dialog = MagicMock()
@@ -1985,8 +2081,8 @@ class TestContextModule(unittest.TestCase):
         with patch.object(context, 'AudioIntroDetector', return_value=fake_detector):
             result = context.get_audio_intro_detection(dialog, {'file': '/videos/e1.mkv'})
 
-        self.assertEqual(result['outro_start_time'], 2400)
-        self.assertIn('outro', dialog.yesno.call_args[0][1])
+        self.assertIsNone(result['outro_start_time'])
+        self.assertNotIn('outro', dialog.yesno.call_args[0][1].lower())
 
     def test_resolve_fenlight_episode_to_local_episode_by_tmdb(self):
         import context
