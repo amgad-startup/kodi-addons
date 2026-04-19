@@ -782,7 +782,9 @@ class SkipIntroPlayer(xbmc.Player):
                         db,
                         show_id,
                         episode_files,
-                        config
+                        config,
+                        episode_detections=detected.get('episode_detections'),
+                        variable_intro=detected.get('variable_intro', False)
                     )
                 db.save_audio_detection_attempt(show_id, watched_count, 'hit')
                 xbmc.log(
@@ -918,10 +920,12 @@ class SkipIntroPlayer(xbmc.Player):
         show_id,
         episode_files,
         config,
-        update_existing_audio_detection=False
+        update_existing_audio_detection=False,
+        episode_detections=None,
+        variable_intro=False
     ):
         """Save audio-detected times as per-episode virtual chapter markers."""
-        episode_markers = {
+        base_episode_markers = {
             'intro_start_time': config.get('intro_start_time'),
             'intro_end_time': config.get('intro_end_time'),
             'outro_start_time': config.get('outro_start_time'),
@@ -930,8 +934,14 @@ class SkipIntroPlayer(xbmc.Player):
             'outro_start_chapter': None,
             'source': 'audio_detection'
         }
-        if episode_markers['intro_end_time'] is None:
+        if base_episode_markers['intro_end_time'] is None:
             return 0
+
+        detections_by_file = {}
+        for detection in episode_detections or []:
+            detection_file = detection.get('file')
+            if detection_file:
+                detections_by_file[detection_file] = detection
 
         saved_count = 0
         metadata = ShowMetadata()
@@ -956,6 +966,19 @@ class SkipIntroPlayer(xbmc.Player):
             ):
                 if not update_existing_audio_detection or existing.get('source') != 'audio_detection':
                     continue
+
+            episode_markers = dict(base_episode_markers)
+            detection = detections_by_file.get(episode_file)
+            if detection:
+                episode_markers['intro_start_time'] = detection.get('intro_start_time')
+                episode_markers['intro_end_time'] = detection.get('intro_end_time')
+            elif update_existing_audio_detection and existing and existing.get('source') == 'audio_detection':
+                episode_markers['intro_start_time'] = existing.get('intro_start_time')
+                episode_markers['intro_end_time'] = existing.get('intro_end_time')
+            elif variable_intro:
+                continue
+            if episode_markers['intro_end_time'] is None:
+                continue
 
             if db.save_episode_times(show_id, season, episode, episode_markers):
                 saved_count += 1

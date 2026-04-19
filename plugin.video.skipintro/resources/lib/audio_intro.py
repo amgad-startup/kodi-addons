@@ -1,4 +1,5 @@
 import array
+import math
 import os
 import shutil
 import subprocess
@@ -29,12 +30,16 @@ DEFAULT_FINGERPRINT_HOP_SECONDS = 1.0
 DEFAULT_FINGERPRINT_MIN_COMMON_SECONDS = 25
 DEFAULT_FINGERPRINT_MIN_OUTRO_SECONDS = 30
 DEFAULT_FINGERPRINT_HAMMING_DISTANCE = 16
+DEFAULT_VARIABLE_FINGERPRINT_MAX_SECONDS = 60
+DEFAULT_VARIABLE_FINGERPRINT_DISTANCE = 0.45
 DEFAULT_INTRO_LIMIT_RATIO = 1.0 / 3.0
 DEFAULT_OUTRO_SEARCH_RATIO = 2.0 / 3.0
 DEFAULT_FFMPEG_TIMEOUT_SECONDS = 180
 FINGERPRINT_BITS = 64
 FINGERPRINT_BUCKETS = FINGERPRINT_BITS // 2
 PCM_SAMPLE_WIDTH_BYTES = 2
+SPECTRAL_SAMPLE_SIZE = 2048
+SPECTRAL_FREQUENCIES = (100, 150, 220, 315, 445, 625, 865, 1175, 1575, 2100, 2800, 3550)
 
 
 class AudioIntroDetectionError(Exception):
@@ -272,6 +277,14 @@ class AudioIntroDetector:
                     f'{self.fingerprint_min_common_seconds:.1f}s',
                     xbmc.LOGINFO
                 )
+            variable_match = self._detect_variable_fingerprint_intro(analyzed, diagnostics=diagnostics)
+            if variable_match:
+                if diagnostics is not None:
+                    diagnostics['status'] = 'hit'
+                    diagnostics['failure_reason'] = None
+                    diagnostics['variable_match'] = self._fingerprint_candidate_summary(variable_match)
+                    diagnostics['rejection_counts'] = self._aggregate_pair_rejections(diagnostics.get('pairs', []))
+                return self._fingerprint_result_from_match(variable_match, analyzed, ffmpeg)
             if diagnostics is not None:
                 diagnostics['status'] = 'miss'
                 diagnostics['failure_reason'] = self._fingerprint_failure_reason(diagnostics, best_rejected)
@@ -282,22 +295,54 @@ class AudioIntroDetector:
                 diagnostics['rejection_counts'] = self._aggregate_pair_rejections(diagnostics.get('pairs', []))
             return None
 
+        if diagnostics is not None:
+            diagnostics['status'] = 'hit'
+            diagnostics['failure_reason'] = None
+            diagnostics['best_match'] = self._fingerprint_candidate_summary(best)
+            diagnostics['rejection_counts'] = self._aggregate_pair_rejections(diagnostics.get('pairs', []))
+        return self._fingerprint_result_from_match(best, analyzed, ffmpeg)
+
+    def _fingerprint_result_from_match(
+        self,
+        match: Dict[str, Any],
+        analyzed: List[Dict[str, object]],
+        ffmpeg: str
+    ) -> Optional[Dict[str, Any]]:
+        if 'episode_matches' in match:
+            detections = []
+            for episode_match in sorted(match['episode_matches'], key=lambda item: item['episode_index']):
+                file_path = analyzed[episode_match['episode_index']]['file']
+                detections.append({
+                    'file': file_path,
+                    'intro_start_time': episode_match['intro_start_time'],
+                    'intro_end_time': episode_match['intro_end_time'],
+                    'match_duration': match['duration'],
+                    'source': 'audio_fingerprint'
+                })
+        else:
+            detections = [
+                {
+                    'file': match['left_file'],
+                    'intro_start_time': match['left_start_time'],
+                    'intro_end_time': match['left_end_time'],
+                    'match_duration': match['duration'],
+                    'source': 'audio_fingerprint'
+                },
+                {
+                    'file': match['right_file'],
+                    'intro_start_time': match['right_start_time'],
+                    'intro_end_time': match['right_end_time'],
+                    'match_duration': match['duration'],
+                    'source': 'audio_fingerprint'
+                }
+            ]
+
         detections = [
-            {
-                'file': best['left_file'],
-                'intro_start_time': best['left_start_time'],
-                'intro_end_time': best['left_end_time'],
-                'match_duration': best['duration'],
-                'source': 'audio_fingerprint'
-            },
-            {
-                'file': best['right_file'],
-                'intro_start_time': best['right_start_time'],
-                'intro_end_time': best['right_end_time'],
-                'match_duration': best['duration'],
-                'source': 'audio_fingerprint'
-            }
+            detection for detection in detections
+            if detection['intro_end_time'] > detection['intro_start_time']
         ]
+        if not detections:
+            return None
         start_times = sorted(d['intro_start_time'] for d in detections)
         end_times = sorted(d['intro_end_time'] for d in detections)
         outro = self._detect_outro_by_fingerprint(analyzed, ffmpeg) if self.detect_outro else None
@@ -309,18 +354,15 @@ class AudioIntroDetector:
             'episode_count': len(analyzed),
             'matching_episode_count': len(detections),
             'episode_detections': detections,
-            'match_duration': best['duration'],
+            'match_duration': match['duration'],
             'source': 'audio_fingerprint'
         }
+        if match.get('variable_intro'):
+            result['variable_intro'] = True
         if outro:
             result['outro_start_time'] = outro['outro_start_time']
             result['outro_match_duration'] = outro['duration']
             result['outro_detections'] = outro['detections']
-        if diagnostics is not None:
-            diagnostics['status'] = 'hit'
-            diagnostics['failure_reason'] = None
-            diagnostics['best_match'] = self._fingerprint_candidate_summary(best)
-            diagnostics['rejection_counts'] = self._aggregate_pair_rejections(diagnostics.get('pairs', []))
         return result
 
     def _detect_outro_by_fingerprint(self, analyzed: List[Dict[str, object]], ffmpeg: str) -> Optional[Dict[str, object]]:
@@ -705,10 +747,12 @@ class AudioIntroDetector:
         for start in range(0, len(samples) - window_size + 1, hop_size):
             window = samples[start:start + window_size]
             fingerprint_hash, rms = self._fingerprint_window(window)
+            spectral = self._spectral_fingerprint_window(window) if fingerprint_hash is not None else None
             fingerprints.append({
                 'time': float(base_time) + start / float(self.fingerprint_sample_rate),
                 'hash': fingerprint_hash,
-                'rms': rms
+                'rms': rms,
+                'spectral': spectral
             })
         return fingerprints
 
@@ -763,6 +807,58 @@ class AudioIntroDetector:
                 fingerprint_hash |= 1 << (offset + index)
 
         return fingerprint_hash, rms
+
+    def _spectral_fingerprint_window(self, window: Sequence[int]) -> Optional[List[float]]:
+        """Return a normalized frequency-band vector for fuzzy intro matching."""
+        if not window:
+            return None
+
+        sample_count = min(SPECTRAL_SAMPLE_SIZE, len(window))
+        if sample_count <= 0:
+            return None
+        offset = max(0, (len(window) - sample_count) // 2)
+        segment = [float(sample) for sample in window[offset:offset + sample_count]]
+        if not segment:
+            return None
+        average = sum(segment) / float(len(segment))
+        if len(segment) > 1:
+            segment = [
+                (sample - average) * (0.5 - 0.5 * math.cos(2.0 * math.pi * index / float(len(segment) - 1)))
+                for index, sample in enumerate(segment)
+            ]
+        else:
+            segment = [segment[0] - average]
+
+        powers = [
+            math.log1p(self._goertzel_power(segment, frequency, self.fingerprint_sample_rate))
+            for frequency in SPECTRAL_FREQUENCIES
+        ]
+        center = sum(powers) / float(len(powers))
+        variance = sum((value - center) * (value - center) for value in powers) / float(len(powers))
+        standard_deviation = variance ** 0.5
+        if standard_deviation <= 0:
+            return None
+        vector = [(value - center) / standard_deviation for value in powers]
+        magnitude = sum(value * value for value in vector) ** 0.5
+        if magnitude <= 0:
+            return None
+        return [value / magnitude for value in vector]
+
+    @staticmethod
+    def _goertzel_power(samples: Sequence[float], frequency: float, sample_rate: float) -> float:
+        sample_count = len(samples)
+        if sample_count <= 0 or sample_rate <= 0:
+            return 0.0
+        bin_index = int(0.5 + (sample_count * frequency) / float(sample_rate))
+        omega = (2.0 * math.pi * bin_index) / float(sample_count)
+        coefficient = 2.0 * math.cos(omega)
+        previous = 0.0
+        previous2 = 0.0
+        for sample in samples:
+            current = sample + coefficient * previous - previous2
+            previous2 = previous
+            previous = current
+        return previous2 * previous2 + previous * previous - coefficient * previous * previous2
 
     def _find_common_fingerprint_run(
         self,
@@ -872,6 +968,180 @@ class AudioIntroDetector:
             diagnostics['rejection_counts'] = rejection_counts
         return best
 
+    def _detect_variable_fingerprint_intro(
+        self,
+        analyzed: List[Dict[str, object]],
+        diagnostics: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Find a fixed-length intro that starts at different times per episode.
+
+        This is a fallback for shows with variable cold opens. It compares
+        frequency-band vectors instead of requiring consecutive hash matches at
+        similar offsets, then returns per-episode detections.
+        """
+        if len(analyzed) < 3:
+            return None
+
+        series = []
+        for item in analyzed:
+            fingerprints = [
+                fp for fp in item.get('fingerprints', [])
+                if fp.get('spectral') is not None and fp.get('time') is not None
+            ]
+            if not fingerprints:
+                return None
+            series.append(fingerprints)
+
+        min_length = max(1, int(round(float(self.fingerprint_min_common_seconds) / float(self.fingerprint_hop_seconds or 1))))
+        max_seconds = min(
+            DEFAULT_VARIABLE_FINGERPRINT_MAX_SECONDS,
+            max(self.fingerprint_min_common_seconds, self.max_scan_seconds)
+        )
+        max_length = max(min_length, int(round(float(max_seconds) / float(self.fingerprint_hop_seconds or 1))))
+        duration_lengths = list(range(min_length, max_length + 1, 5))
+        if max_length not in duration_lengths:
+            duration_lengths.append(max_length)
+
+        minimum_support = min(len(series), max(3, len(series) - 1))
+        best = None
+        for length in duration_lengths:
+            candidate = self._variable_intro_candidate_for_length(series, analyzed, length, minimum_support)
+            if not candidate:
+                continue
+            if self._is_better_variable_fingerprint_match(candidate, best):
+                best = candidate
+
+        if diagnostics is not None:
+            variable_diag = diagnostics.setdefault('variable_intro', {})
+            variable_diag['attempted'] = True
+            variable_diag['minimum_support'] = minimum_support
+            variable_diag['duration_seconds'] = round(best['duration'], 3) if best else None
+            variable_diag['support_count'] = len(best.get('episode_matches', [])) if best else 0
+            variable_diag['average_distance'] = round(best.get('average_distance', 0), 3) if best else None
+
+        return best
+
+    def _variable_intro_candidate_for_length(
+        self,
+        series: List[List[Dict[str, Any]]],
+        analyzed: List[Dict[str, object]],
+        length: int,
+        minimum_support: int
+    ) -> Optional[Dict[str, Any]]:
+        best = None
+        for reference_index, reference in enumerate(series):
+            max_reference_start = len(reference) - length + 1
+            if max_reference_start <= 0:
+                continue
+            pair_best = {}
+            for other_index, other in enumerate(series):
+                if other_index == reference_index:
+                    continue
+                pair_best[other_index] = self._spectral_best_matches_by_reference_start(reference, other, length)
+
+            for reference_start in range(max_reference_start):
+                matches = [{
+                    'episode_index': reference_index,
+                    'start_index': reference_start,
+                    'distance': 0.0,
+                }]
+                distances = []
+                for other_index, starts in pair_best.items():
+                    if reference_start >= len(starts):
+                        continue
+                    distance, other_start = starts[reference_start]
+                    if other_start is None or distance > DEFAULT_VARIABLE_FINGERPRINT_DISTANCE:
+                        continue
+                    matches.append({
+                        'episode_index': other_index,
+                        'start_index': other_start,
+                        'distance': distance,
+                    })
+                    distances.append(distance)
+
+                if len(matches) < minimum_support:
+                    continue
+
+                episode_matches = []
+                rejected_for_bounds = False
+                for match in matches:
+                    episode_index = match['episode_index']
+                    start_index = match['start_index']
+                    start_time = series[episode_index][start_index]['time']
+                    hop = self._fingerprint_run_hop(series[episode_index], start_index, start_index + length - 1)
+                    end_time = series[episode_index][start_index + length - 1]['time'] + hop
+                    max_end = self._intro_end_limit(analyzed[episode_index].get('duration'))
+                    if max_end is not None and end_time > max_end:
+                        rejected_for_bounds = True
+                        break
+                    episode_matches.append({
+                        'episode_index': episode_index,
+                        'intro_start_time': start_time,
+                        'intro_end_time': end_time,
+                        'distance': match['distance'],
+                    })
+                if rejected_for_bounds:
+                    continue
+
+                average_distance = sum(distances) / float(len(distances)) if distances else 0.0
+                candidate = {
+                    'duration': min(item['intro_end_time'] - item['intro_start_time'] for item in episode_matches),
+                    'raw_duration': min(item['intro_end_time'] - item['intro_start_time'] for item in episode_matches),
+                    'left_start_time': episode_matches[0]['intro_start_time'],
+                    'left_end_time': episode_matches[0]['intro_end_time'],
+                    'right_start_time': episode_matches[1]['intro_start_time'],
+                    'right_end_time': episode_matches[1]['intro_end_time'],
+                    'start_spread': (
+                        max(item['intro_start_time'] for item in episode_matches) -
+                        min(item['intro_start_time'] for item in episode_matches)
+                    ),
+                    'average_distance': average_distance,
+                    'episode_matches': episode_matches,
+                    'variable_intro': True,
+                }
+                if self._fingerprint_threshold_duration(candidate) < self.fingerprint_min_common_seconds:
+                    continue
+                if self._is_better_variable_fingerprint_match(candidate, best):
+                    best = candidate
+        return best
+
+    def _spectral_best_matches_by_reference_start(
+        self,
+        reference: List[Dict[str, Any]],
+        other: List[Dict[str, Any]],
+        length: int
+    ) -> List[Tuple[float, Optional[int]]]:
+        max_reference_start = len(reference) - length + 1
+        max_other_start = len(other) - length + 1
+        if max_reference_start <= 0 or max_other_start <= 0:
+            return []
+
+        diagonal_prefix = [[0.0] * (len(other) + 1) for _ in range(len(reference) + 1)]
+        for reference_index in range(len(reference)):
+            reference_vector = reference[reference_index].get('spectral')
+            for other_index in range(len(other)):
+                other_vector = other[other_index].get('spectral')
+                diagonal_prefix[reference_index + 1][other_index + 1] = (
+                    self._spectral_dot(reference_vector, other_vector) +
+                    diagonal_prefix[reference_index][other_index]
+                )
+
+        best_by_reference = []
+        for reference_start in range(max_reference_start):
+            best_distance = None
+            best_other_start = None
+            for other_start in range(max_other_start):
+                similarity = (
+                    diagonal_prefix[reference_start + length][other_start + length] -
+                    diagonal_prefix[reference_start][other_start]
+                ) / float(length)
+                distance = 1.0 - similarity
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
+                    best_other_start = other_start
+            best_by_reference.append((best_distance if best_distance is not None else 999.0, best_other_start))
+        return best_by_reference
+
     def _fingerprint_run_hop(self, fingerprints: List[Dict[str, float]], start_index: int, end_index: int) -> float:
         for index in range(start_index + 1, end_index + 1):
             delta = fingerprints[index]['time'] - fingerprints[index - 1]['time']
@@ -947,6 +1217,9 @@ class AudioIntroDetector:
         }
         if rejection_reason:
             summary['rejection_reason'] = rejection_reason
+        if match.get('variable_intro'):
+            summary['variable_intro'] = True
+            summary['support_count'] = len(match.get('episode_matches', []))
         return summary
 
     def _record_fingerprint_candidate(
@@ -1043,6 +1316,30 @@ class AudioIntroDetector:
         if candidate.get('start_spread', 0) != current.get('start_spread', 0):
             return candidate.get('start_spread', 0) < current.get('start_spread', 0)
         return candidate.get('average_distance', 0) < current.get('average_distance', 0)
+
+    @staticmethod
+    def _is_better_variable_fingerprint_match(candidate: Dict[str, Any], current: Optional[Dict[str, Any]]) -> bool:
+        if not current:
+            return True
+        candidate_support = len(candidate.get('episode_matches', []))
+        current_support = len(current.get('episode_matches', []))
+        if candidate_support != current_support:
+            return candidate_support > current_support
+        candidate_distance = candidate.get('average_distance', 999.0)
+        current_distance = current.get('average_distance', 999.0)
+        if abs(candidate_distance - current_distance) <= 0.02 and candidate['duration'] != current['duration']:
+            return candidate['duration'] > current['duration']
+        if candidate_distance != current_distance:
+            return candidate_distance < current_distance
+        if candidate['duration'] != current['duration']:
+            return candidate['duration'] > current['duration']
+        return candidate.get('start_spread', 0) < current.get('start_spread', 0)
+
+    @staticmethod
+    def _spectral_dot(left: Optional[Sequence[float]], right: Optional[Sequence[float]]) -> float:
+        if not left or not right:
+            return 0.0
+        return sum(float(a) * float(b) for a, b in zip(left, right))
 
     @staticmethod
     def _is_better_outro_match(candidate: Dict[str, float], current: Optional[Dict[str, float]]) -> bool:

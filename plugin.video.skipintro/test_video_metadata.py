@@ -707,6 +707,40 @@ class TestSkipIntro(unittest.TestCase):
             self.assertIsNone(config['outro_start_time'])
             self.assertEqual(config['source'], 'audio_detection')
 
+    def test_audio_virtual_markers_use_variable_episode_detections(self):
+        """Variable cold-open detections save per-episode intro starts"""
+        title = f'Variable Audio Show {uuid.uuid4().hex}'
+        show_id = self.player.db.get_show(title)
+        episode_files = [
+            '/videos/Variable.Audio.Show.S01E02.mkv',
+            '/videos/Variable.Audio.Show.S01E03.mkv',
+            '/videos/Variable.Audio.Show.S01E04.mkv',
+            '/videos/Variable.Audio.Show.S01E05.mkv',
+        ]
+
+        count = self.player._save_audio_detection_episode_markers(
+            self.player.db,
+            show_id,
+            episode_files,
+            {
+                'intro_start_time': 40,
+                'intro_end_time': 70,
+                'outro_start_time': None,
+            },
+            episode_detections=[
+                {'file': episode_files[0], 'intro_start_time': 40, 'intro_end_time': 70},
+                {'file': episode_files[1], 'intro_start_time': 20, 'intro_end_time': 50},
+                {'file': episode_files[2], 'intro_start_time': 55, 'intro_end_time': 85},
+            ],
+            variable_intro=True
+        )
+
+        self.assertEqual(count, 3)
+        self.assertEqual(self.player.db.get_episode_times(show_id, 1, 2)['intro_start_time'], 40)
+        self.assertEqual(self.player.db.get_episode_times(show_id, 1, 3)['intro_start_time'], 20)
+        self.assertEqual(self.player.db.get_episode_times(show_id, 1, 4)['intro_start_time'], 55)
+        self.assertIsNone(self.player.db.get_episode_times(show_id, 1, 5))
+
     def test_background_outro_detection_updates_show_and_virtual_markers(self):
         """Background-only outro detection updates saved show and generated episode markers"""
         title = f'Background Outro Show {uuid.uuid4().hex}'
@@ -1399,6 +1433,57 @@ class TestAudioIntroDetector(unittest.TestCase):
         self.assertEqual(diagnostics['failure_reason'], 'below_min_common_seconds')
         self.assertEqual(diagnostics['rejection_counts']['below_min_common_seconds'], 1)
         self.assertEqual(diagnostics['best_rejected']['duration_bucket'], 'too_short')
+
+    def test_detect_show_intro_by_fingerprint_finds_variable_cold_open_intro(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        def fingerprints(intro_start, intro_length, filler_vector, hash_prefix):
+            values = []
+            common_vector = [1.0, 0.0]
+            for index in range(90):
+                is_intro = intro_start <= index < intro_start + intro_length
+                values.append({
+                    'time': float(index),
+                    'hash': hash_prefix + index,
+                    'rms': 1000,
+                    'spectral': common_vector if is_intro else filler_vector
+                })
+            return values
+
+        detector = AudioIntroDetector(
+            backend='fingerprint',
+            max_episodes=3,
+            fingerprint_window_seconds=2,
+            fingerprint_hop_seconds=1,
+            fingerprint_min_common_seconds=25,
+            fingerprint_hamming_distance=0
+        )
+        detector._find_ffmpeg = MagicMock(return_value='ffmpeg')
+        detector._probe_duration = MagicMock(return_value=300)
+        detector._detect_outro_by_fingerprint = MagicMock(return_value=None)
+        detector._fingerprint_file = MagicMock(side_effect=[
+            fingerprints(40, 30, [0.0, 1.0], 0x1000000000000000),
+            fingerprints(20, 30, [0.0, -1.0], 0x2000000000000000),
+            fingerprints(55, 30, [-1.0, 0.0], 0x4000000000000000),
+        ])
+        diagnostics = {}
+
+        result = detector.detect_show_intro(['e1.mkv', 'e2.mkv', 'e3.mkv'], diagnostics=diagnostics)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result['variable_intro'])
+        self.assertEqual(result['matching_episode_count'], 3)
+        self.assertEqual(result['match_duration'], 30)
+        self.assertEqual(
+            [(d['file'], d['intro_start_time'], d['intro_end_time']) for d in result['episode_detections']],
+            [
+                ('e1.mkv', 40.0, 70.0),
+                ('e2.mkv', 20.0, 50.0),
+                ('e3.mkv', 55.0, 85.0),
+            ]
+        )
+        self.assertEqual(diagnostics['status'], 'hit')
+        self.assertTrue(diagnostics['variable_match']['variable_intro'])
 
     def test_detect_show_intro_by_fingerprint_default_accepts_shorter_intro(self):
         from resources.lib.audio_intro import AudioIntroDetector
