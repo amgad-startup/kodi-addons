@@ -10,6 +10,7 @@ class Settings:
         """Validate and sanitize addon settings"""
         try:
             enable_autoskip = self.addon.getSettingBool('enable_autoskip')
+            enable_audio_autodetect = self.addon.getSettingBool('enable_audio_autodetect')
             pre_skip_seconds = int(self.addon.getSetting('pre_skip_seconds'))
             delay_autoskip = int(self.addon.getSetting('delay_autoskip'))
             auto_dismiss_button = int(self.addon.getSetting('auto_dismiss_button'))
@@ -40,6 +41,7 @@ class Settings:
 
             return {
                 'enable_autoskip': enable_autoskip,
+                'enable_audio_autodetect': enable_audio_autodetect,
                 'pre_skip_seconds': pre_skip_seconds,
                 'delay_autoskip': delay_autoskip,
                 'auto_dismiss_button': auto_dismiss_button
@@ -48,6 +50,7 @@ class Settings:
             xbmc.log(f'SkipIntro: Error reading settings: {str(e)} - using defaults', xbmc.LOGERROR)
             return {
                 'enable_autoskip': True,
+                'enable_audio_autodetect': True,
                 'pre_skip_seconds': 3,
                 'delay_autoskip': 0,
                 'auto_dismiss_button': 0

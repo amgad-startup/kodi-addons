@@ -114,6 +114,26 @@ class ShowDatabase:
                     'created_at': 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'
                 }, 'FOREIGN KEY (show_id) REFERENCES shows(id), UNIQUE(show_id, season, episode)')
 
+                # Episodes watched far enough to trigger silent show-level
+                # audio detection after the user has sampled the show.
+                self._migrate_table(c, 'audio_detection_episodes', {
+                    'id': 'INTEGER PRIMARY KEY AUTOINCREMENT',
+                    'show_id': 'INTEGER',
+                    'season': 'INTEGER',
+                    'episode': 'INTEGER',
+                    'file_path': 'TEXT',
+                    'created_at': 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'
+                }, 'FOREIGN KEY (show_id) REFERENCES shows(id), UNIQUE(show_id, season, episode)')
+
+                # Last automatic audio-detection attempt per show. The watched
+                # count allows retrying only when a new episode adds evidence.
+                self._migrate_table(c, 'audio_detection_attempts', {
+                    'show_id': 'INTEGER PRIMARY KEY',
+                    'watched_episode_count': 'INTEGER',
+                    'status': 'TEXT',
+                    'created_at': 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'
+                }, 'FOREIGN KEY (show_id) REFERENCES shows(id)')
+
                 conn.commit()
                 xbmc.log('SkipIntro: Database migration completed successfully', xbmc.LOGINFO)
             finally:
@@ -128,7 +148,7 @@ class ShowDatabase:
         xbmc.log(f'SkipIntro: Migrating {table_name} table', xbmc.LOGINFO)
 
         # Whitelist of allowed table names for security
-        allowed_tables = {'shows', 'shows_config', 'episodes'}
+        allowed_tables = {'shows', 'shows_config', 'episodes', 'audio_detection_episodes', 'audio_detection_attempts'}
         if table_name not in allowed_tables:
             xbmc.log(f'SkipIntro: Invalid table name: {table_name}', xbmc.LOGERROR)
             return
@@ -388,6 +408,108 @@ class ShowDatabase:
         except Exception as e:
             xbmc.log(f'SkipIntro: Error getting episode times: {str(e)}', xbmc.LOGERROR)
             return None
+
+    def record_audio_detection_episode(self, show_id, season, episode, file_path):
+        """Remember that an episode was watched for automatic audio detection."""
+        try:
+            if season is None or episode is None or not file_path:
+                return False
+
+            conn = self._get_connection()
+            needs_close = (not self._persistent_conn)
+            try:
+                c = conn.cursor()
+                c.execute('''
+                    INSERT OR REPLACE INTO audio_detection_episodes
+                    (show_id, season, episode, file_path)
+                    VALUES (?, ?, ?, ?)
+                ''', (show_id, season, episode, file_path))
+                conn.commit()
+                xbmc.log(
+                    f'SkipIntro: Recorded watched episode for audio detection: '
+                    f'show={show_id} S{season}E{episode}',
+                    xbmc.LOGINFO
+                )
+                return True
+            finally:
+                if needs_close:
+                    conn.close()
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Error recording audio detection episode: {str(e)}', xbmc.LOGERROR)
+            return False
+
+    def get_audio_detection_episode_count(self, show_id):
+        """Return count of unique watched episodes for automatic audio detection."""
+        try:
+            conn = self._get_connection()
+            needs_close = (not self._persistent_conn)
+            try:
+                c = conn.cursor()
+                c.execute(
+                    'SELECT COUNT(*) FROM audio_detection_episodes WHERE show_id = ?',
+                    (show_id,)
+                )
+                result = c.fetchone()
+                return int(result[0] or 0) if result else 0
+            finally:
+                if needs_close:
+                    conn.close()
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Error counting audio detection episodes: {str(e)}', xbmc.LOGERROR)
+            return 0
+
+    def get_audio_detection_attempt(self, show_id):
+        """Return last automatic audio-detection attempt for a show."""
+        try:
+            conn = self._get_connection()
+            needs_close = (not self._persistent_conn)
+            try:
+                c = conn.cursor()
+                c.execute('''
+                    SELECT watched_episode_count, status, created_at
+                    FROM audio_detection_attempts
+                    WHERE show_id = ?
+                ''', (show_id,))
+                result = c.fetchone()
+                if not result:
+                    return None
+                return {
+                    'watched_episode_count': result[0],
+                    'status': result[1],
+                    'created_at': result[2]
+                }
+            finally:
+                if needs_close:
+                    conn.close()
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Error getting audio detection attempt: {str(e)}', xbmc.LOGERROR)
+            return None
+
+    def save_audio_detection_attempt(self, show_id, watched_episode_count, status):
+        """Persist the latest automatic audio-detection attempt status."""
+        try:
+            conn = self._get_connection()
+            needs_close = (not self._persistent_conn)
+            try:
+                c = conn.cursor()
+                c.execute('''
+                    INSERT OR REPLACE INTO audio_detection_attempts
+                    (show_id, watched_episode_count, status)
+                    VALUES (?, ?, ?)
+                ''', (show_id, watched_episode_count, status))
+                conn.commit()
+                xbmc.log(
+                    f'SkipIntro: Saved audio detection attempt for show={show_id}: '
+                    f'count={watched_episode_count}, status={status}',
+                    xbmc.LOGINFO
+                )
+                return True
+            finally:
+                if needs_close:
+                    conn.close()
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Error saving audio detection attempt: {str(e)}', xbmc.LOGERROR)
+            return False
 
     def get_show_times(self, show_id):
         """Get intro/outro times or chapters for a show"""

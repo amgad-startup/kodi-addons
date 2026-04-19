@@ -7,6 +7,11 @@
                     <default>true</default>
                     <control type="toggle" />
                 </setting>
+                <setting id="enable_audio_autodetect" type="boolean" label="32093" help="32094">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle" />
+                </setting>
                 <setting id="pre_skip_seconds" type="integer" label="32063" help="32064">
                     <level>0</level>
                     <default>3</default>

@@ -4,6 +4,7 @@ import os
 import json
 import subprocess
 import struct
+import uuid
 import warnings
 from unittest.mock import MagicMock, patch
 
@@ -98,6 +99,7 @@ class MockXBMCAddon:
         def __init__(self, addon_id=None):
             self._settings = {
                 "enable_autoskip": "true",
+                "enable_audio_autodetect": "true",
                 "pre_skip_seconds": "3",
                 "delay_autoskip": "0",
                 "auto_dismiss_button": "0",
@@ -234,6 +236,19 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(config['intro_start_time'], 0)
         self.assertEqual(config['intro_end_time'], 263)
         self.assertEqual(config['source'], 'audio_detection')
+
+    def test_audio_detection_episode_and_attempt_persistence(self):
+        """Watched episode history and attempt status are persisted"""
+        show_id = self.db.get_show('Test Show')
+
+        self.assertTrue(self.db.record_audio_detection_episode(show_id, 1, 2, '/videos/e2.mkv'))
+        self.assertTrue(self.db.record_audio_detection_episode(show_id, 1, 3, '/videos/e3.mkv'))
+        self.assertEqual(self.db.get_audio_detection_episode_count(show_id), 2)
+
+        self.assertTrue(self.db.save_audio_detection_attempt(show_id, 2, 'miss'))
+        attempt = self.db.get_audio_detection_attempt(show_id)
+        self.assertEqual(attempt['watched_episode_count'], 2)
+        self.assertEqual(attempt['status'], 'miss')
 
 class TestMetadata(unittest.TestCase):
     def setUp(self):
@@ -567,6 +582,113 @@ class TestSkipIntro(unittest.TestCase):
         self.assertIsNone(self.player.intro_bookmark)
         self.assertIsNone(self.player._skip_to_chapter)
 
+    def test_audio_autodetect_starts_after_second_watched_episode(self):
+        """Playback history triggers silent audio detection after two episodes"""
+        title = f'Auto Audio Show {uuid.uuid4().hex}'
+        self.player.show_info = {'title': title, 'season': 1, 'episode': 2}
+        self.player._playing_file = '/videos/Auto.Audio.Show.S01E02.mkv'
+        self.player._max_playback_time = 120
+        self.player._start_audio_detection_thread = MagicMock()
+
+        self.player._record_watched_episode_for_audio_detection()
+        self.player.show_info = {'title': title, 'season': 1, 'episode': 3}
+        self.player._playing_file = '/videos/Auto.Audio.Show.S01E03.mkv'
+        self.player._max_playback_time = 120
+        self.player._record_watched_episode_for_audio_detection()
+
+        show_id = self.player.db.get_show(title)
+        self.assertEqual(self.player.db.get_audio_detection_episode_count(show_id), 2)
+        self.player._start_audio_detection_thread.assert_called_once()
+        args = self.player._start_audio_detection_thread.call_args[0]
+        self.assertEqual(args[0], show_id)
+        self.assertEqual(args[1], title)
+        self.assertEqual(args[2], '/videos/Auto.Audio.Show.S01E03.mkv')
+        self.assertEqual(args[3], 2)
+        self.assertEqual(args[4], [])
+
+    def test_audio_autodetect_waits_for_minimum_watch_time(self):
+        """Short accidental playback does not count as watched"""
+        title = f'Short Watch Show {uuid.uuid4().hex}'
+        self.player.show_info = {'title': title, 'season': 1, 'episode': 2}
+        self.player._playing_file = '/videos/Short.Watch.Show.S01E02.mkv'
+        self.player._max_playback_time = 20
+        self.player._start_audio_detection_thread = MagicMock()
+
+        self.player._record_watched_episode_for_audio_detection()
+
+        show_id = self.player.db.get_show(title)
+        self.assertEqual(self.player.db.get_audio_detection_episode_count(show_id), 0)
+        self.player._start_audio_detection_thread.assert_not_called()
+
+    def test_audio_autodetect_does_not_retry_same_watched_count(self):
+        """A previous attempt suppresses another run until a new episode is watched"""
+        title = f'Attempted Show {uuid.uuid4().hex}'
+        self.player.show_info = {'title': title, 'season': 1, 'episode': 3}
+        self.player._playing_file = '/videos/Attempted.Show.S01E03.mkv'
+        self.player._max_playback_time = 120
+        show_id = self.player.db.get_show(title)
+        self.player.db.record_audio_detection_episode(show_id, 1, 2, '/videos/Attempted.Show.S01E02.mkv')
+        self.player.db.save_audio_detection_attempt(show_id, 2, 'miss')
+        self.player._start_audio_detection_thread = MagicMock()
+
+        self.player._record_watched_episode_for_audio_detection()
+
+        self.assertEqual(self.player.db.get_audio_detection_episode_count(show_id), 2)
+        self.player._start_audio_detection_thread.assert_not_called()
+
+    def test_run_audio_detection_saves_detected_intro_and_outro(self):
+        """Automatic audio detection saves show-level intro/outro config"""
+        title = f'Audio Hit Show {uuid.uuid4().hex}'
+        show_id = self.player.db.get_show(title)
+        self.player.getChapters = MagicMock(return_value=[])
+        initial_detector = MagicMock()
+        initial_detector.find_episode_candidates.return_value = ['e2.mkv', 'e3.mkv']
+        initial_detector.detect_show_intro.return_value = {
+            'intro_start_time': 0,
+            'intro_end_time': 88,
+            'outro_start_time': 2400,
+        }
+
+        with patch.object(default, 'AudioIntroDetector', return_value=initial_detector):
+            result = self.player._run_audio_detection_for_show(
+                self.player.db,
+                show_id,
+                title,
+                '/videos/Audio.Hit.Show.S01E03.mkv',
+                2
+            )
+
+        self.assertIsNotNone(result)
+        config = self.player.db.get_show_config(show_id)
+        self.assertFalse(config['use_chapters'])
+        self.assertEqual(config['intro_start_time'], 0)
+        self.assertEqual(config['intro_end_time'], 88)
+        self.assertEqual(config['outro_start_time'], 2400)
+        attempt = self.player.db.get_audio_detection_attempt(show_id)
+        self.assertEqual(attempt['status'], 'hit')
+
+    def test_audio_detection_config_uses_chapters_when_times_align(self):
+        """Audio-detected times keep timestamp fallback and add chapter numbers when aligned"""
+        self.player.getChapters = MagicMock(return_value=[
+            {'time': 0, 'number': 1},
+            {'time': 88, 'number': 2},
+            {'time': 2400, 'number': 5},
+        ])
+
+        config = self.player._build_audio_detection_config({
+            'intro_start_time': 0,
+            'intro_end_time': 88.5,
+            'outro_start_time': 2400.25,
+        })
+
+        self.assertTrue(config['use_chapters'])
+        self.assertEqual(config['intro_start_chapter'], 1)
+        self.assertEqual(config['intro_end_chapter'], 2)
+        self.assertEqual(config['outro_start_chapter'], 5)
+        self.assertEqual(config['intro_start_time'], 0)
+        self.assertEqual(config['intro_end_time'], 88.5)
+        self.assertEqual(config['outro_start_time'], 2400.25)
+
 class TestSkipDialog(unittest.TestCase):
     """Tests for skip button display logic and actual skip execution"""
 
@@ -746,6 +868,7 @@ class TestSettings(unittest.TestCase):
         """Normal settings are read correctly"""
         s = default.Settings()
         self.assertTrue(s.settings['enable_autoskip'])
+        self.assertTrue(s.settings['enable_audio_autodetect'])
         self.assertEqual(s.settings['pre_skip_seconds'], 3)
         self.assertEqual(s.settings['delay_autoskip'], 0)
         self.assertEqual(s.settings['auto_dismiss_button'], 0)
@@ -761,6 +884,7 @@ class TestSettings(unittest.TestCase):
         with patch.object(MockXBMCAddon.Addon, 'getSetting', return_value='not_a_number'):
             s = default.Settings()
             self.assertTrue(s.settings['enable_autoskip'])
+            self.assertTrue(s.settings['enable_audio_autodetect'])
             self.assertEqual(s.settings['pre_skip_seconds'], 3)
             self.assertEqual(s.settings['delay_autoskip'], 0)
 
@@ -2203,6 +2327,8 @@ class TestDatabaseMigration(unittest.TestCase):
         self.assertIn('shows', tables)
         self.assertIn('shows_config', tables)
         self.assertIn('episodes', tables)
+        self.assertIn('audio_detection_episodes', tables)
+        self.assertIn('audio_detection_attempts', tables)
 
     def test_shows_config_columns(self):
         """shows_config has all required columns"""

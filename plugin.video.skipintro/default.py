@@ -12,12 +12,20 @@ from resources.lib.chapters import ChapterManager
 from resources.lib.ui import PlayerUI
 from resources.lib.database import ShowDatabase
 from resources.lib.metadata import ShowMetadata
+from resources.lib.audio_intro import AudioIntroDetectionError, AudioIntroDetector
 
 addon = xbmcaddon.Addon()
 
 # Constants
 CHAPTER_WAIT_MS = 3000  # Additional wait for chapters to be available (3 seconds)
 MONITOR_INTERVAL_SEC = 0.5  # How often to check playback state (500ms)
+AUTO_AUDIO_DETECTION_MIN_WATCH_SECONDS = 60
+AUTO_AUDIO_DETECTION_TRIGGER_EPISODES = 2
+AUDIO_DETECTION_INITIAL_SCAN_SECONDS = 90
+AUDIO_DETECTION_FALLBACK_SCAN_SECONDS = 180
+
+_audio_detection_lock = threading.Lock()
+_audio_detection_running_shows = set()
 
 def get_database():
     """Initialize and return database connection"""
@@ -51,6 +59,9 @@ class SkipIntroPlayer(xbmc.Player):
         self.show_from_start = False  # Flag for chapter-only mode
         self.has_config = False  # Track if show has saved configuration
         self._skip_to_chapter = None  # Chapter number for network-file seek
+        self._playing_file = None
+        self._max_playback_time = 0
+        self._playback_chapters = []
 
         # Initialize settings
         self.settings_manager = Settings()
@@ -69,10 +80,12 @@ class SkipIntroPlayer(xbmc.Player):
 
     def onPlayBackStopped(self):
         """Called when playback is stopped by user"""
+        self._record_watched_episode_for_audio_detection(force=False)
         self.cleanup()
 
     def onPlayBackEnded(self):
         """Called when playback ends naturally"""
+        self._record_watched_episode_for_audio_detection(force=True)
         self.cleanup()
 
     def onPlayBackStarted(self):
@@ -113,12 +126,19 @@ class SkipIntroPlayer(xbmc.Player):
         self.show_from_start = False
         self.has_config = False
         self._skip_to_chapter = None
+        self._playing_file = None
+        self._max_playback_time = 0
+        self._playback_chapters = []
 
         # Wait for video info to become available (up to 5s, polls every 500ms)
         if not self._wait_for_video_info():
             return
 
         self.detect_show()
+        try:
+            self._playing_file = self.getPlayingFile()
+        except Exception:
+            self._playing_file = None
 
         if self.show_info:
             # Check saved times immediately (no wait needed for time-based config)
@@ -212,6 +232,9 @@ class SkipIntroPlayer(xbmc.Player):
 
     def onPlayBackTime(self, time):
         """Called during playback with current time"""
+        if time is not None and time > self._max_playback_time:
+            self._max_playback_time = time
+
         # Use lock to prevent race conditions
         with self._timer_lock:
             # Check warning timer first - show the button dialog
@@ -539,6 +562,8 @@ class SkipIntroPlayer(xbmc.Player):
         if not chapters:
             # Fallback to metadata InfoLabels (works for network streams)
             chapters = self.metadata.get_chapters()
+        if chapters:
+            self._playback_chapters = chapters
         return chapters
 
     def _try_autodetect(self):
@@ -606,6 +631,240 @@ class SkipIntroPlayer(xbmc.Player):
         }
         self.db.save_show_config(show_id, config)
         xbmc.log(f'SkipIntro: Autodetect saved config for {self.show_info["title"]}', xbmc.LOGINFO)
+
+    def _record_watched_episode_for_audio_detection(self, force=False):
+        """Record watched episodes and start silent audio detection when ready."""
+        if not self.settings.get('enable_audio_autodetect', True):
+            return
+        if not self.db or not self.show_info:
+            return
+        if not force and self._max_playback_time < AUTO_AUDIO_DETECTION_MIN_WATCH_SECONDS:
+            xbmc.log(
+                f'SkipIntro: Audio autodetect watch record skipped; only watched '
+                f'{self._max_playback_time:.1f}s',
+                xbmc.LOGINFO
+            )
+            return
+
+        playing_file = self._playing_file
+        if not playing_file:
+            try:
+                playing_file = self.getPlayingFile()
+            except Exception:
+                playing_file = None
+        if not playing_file:
+            return
+
+        season = self.show_info.get('season')
+        episode = self.show_info.get('episode')
+        if season is None or episode is None:
+            return
+
+        show_id = self.db.get_show(self.show_info['title'])
+        if not show_id:
+            return
+
+        if self._show_has_skip_config(show_id, self.db):
+            xbmc.log('SkipIntro: Audio autodetect skipped; show already has config', xbmc.LOGINFO)
+            return
+
+        if not self.db.record_audio_detection_episode(show_id, season, episode, playing_file):
+            return
+
+        watched_count = self.db.get_audio_detection_episode_count(show_id)
+        if watched_count < AUTO_AUDIO_DETECTION_TRIGGER_EPISODES:
+            xbmc.log(
+                f'SkipIntro: Audio autodetect waiting for more watched episodes '
+                f'({watched_count}/{AUTO_AUDIO_DETECTION_TRIGGER_EPISODES})',
+                xbmc.LOGINFO
+            )
+            return
+
+        attempt = self.db.get_audio_detection_attempt(show_id)
+        if attempt and (attempt.get('watched_episode_count') or 0) >= watched_count:
+            xbmc.log('SkipIntro: Audio autodetect already attempted for current watched count', xbmc.LOGINFO)
+            return
+
+        chapters = list(self._playback_chapters)
+        self._start_audio_detection_thread(show_id, self.show_info['title'], playing_file, watched_count, chapters)
+
+    @staticmethod
+    def _show_has_skip_config(show_id, db):
+        config = db.get_show_config(show_id)
+        return bool(config and (
+            config.get('intro_end_time') is not None or
+            config.get('intro_end_chapter') is not None
+        ))
+
+    def _start_audio_detection_thread(self, show_id, show_title, selected_file, watched_count, chapters=None):
+        """Start a single background audio detection job per show."""
+        with _audio_detection_lock:
+            if show_id in _audio_detection_running_shows:
+                xbmc.log(f'SkipIntro: Audio autodetect already running for {show_title}', xbmc.LOGINFO)
+                return
+            _audio_detection_running_shows.add(show_id)
+
+        def worker():
+            try:
+                db = get_database()
+                if not db:
+                    xbmc.log('SkipIntro: Audio autodetect could not open database', xbmc.LOGERROR)
+                    return
+                try:
+                    self._run_audio_detection_for_show(db, show_id, show_title, selected_file, watched_count, chapters)
+                finally:
+                    db.close()
+            finally:
+                with _audio_detection_lock:
+                    _audio_detection_running_shows.discard(show_id)
+
+        thread = threading.Thread(
+            target=worker,
+            name=f'SkipIntroAudioDetect-{show_id}',
+            daemon=True
+        )
+        thread.start()
+        xbmc.log(f'SkipIntro: Started audio autodetect worker for {show_title}', xbmc.LOGINFO)
+
+    def _run_audio_detection_for_show(self, db, show_id, show_title, selected_file, watched_count, chapters=None):
+        """Run progressive fingerprint detection and persist show config on hit."""
+        if self._show_has_skip_config(show_id, db):
+            xbmc.log(f'SkipIntro: Audio autodetect skipped for {show_title}; config already exists', xbmc.LOGINFO)
+            db.save_audio_detection_attempt(show_id, watched_count, 'skipped_existing_config')
+            return None
+
+        try:
+            detector = AudioIntroDetector(
+                backend='fingerprint',
+                max_scan_seconds=AUDIO_DETECTION_INITIAL_SCAN_SECONDS
+            )
+            candidates = detector.find_episode_candidates(
+                selected_file,
+                skip_first_episode=True
+            )
+            if len(candidates) < 2:
+                xbmc.log(
+                    f'SkipIntro: Audio autodetect skipped for {show_title}; '
+                    f'only {len(candidates)} candidate episode(s)',
+                    xbmc.LOGWARNING
+                )
+                db.save_audio_detection_attempt(show_id, watched_count, 'insufficient_candidates')
+                return None
+
+            xbmc.log(
+                f'SkipIntro: Audio autodetect analyzing {len(candidates)} episode(s) for {show_title}',
+                xbmc.LOGINFO
+            )
+            detected = detector.detect_show_intro(candidates)
+            if not detected:
+                xbmc.log(f'SkipIntro: Audio autodetect extending scan for {show_title}', xbmc.LOGINFO)
+                fallback_detector = AudioIntroDetector(
+                    backend='fingerprint',
+                    max_scan_seconds=AUDIO_DETECTION_FALLBACK_SCAN_SECONDS
+                )
+                detected = fallback_detector.detect_show_intro(candidates)
+
+            if not self._is_valid_audio_detection(detected):
+                xbmc.log(f'SkipIntro: Audio autodetect found no stable intro for {show_title}', xbmc.LOGINFO)
+                db.save_audio_detection_attempt(show_id, watched_count, 'miss')
+                return None
+
+            config = self._build_audio_detection_config(detected, chapters=chapters)
+            if db.save_show_config(show_id, config):
+                db.save_audio_detection_attempt(show_id, watched_count, 'hit')
+                xbmc.log(
+                    f'SkipIntro: Audio autodetect saved config for {show_title}: '
+                    f'intro {config.get("intro_start_time")}->{config.get("intro_end_time")}, '
+                    f'outro {config.get("outro_start_time")}',
+                    xbmc.LOGINFO
+                )
+                return config
+
+            db.save_audio_detection_attempt(show_id, watched_count, 'save_failed')
+            return None
+        except AudioIntroDetectionError as e:
+            xbmc.log(f'SkipIntro: Audio autodetect unavailable for {show_title}: {str(e)}', xbmc.LOGWARNING)
+            db.save_audio_detection_attempt(show_id, watched_count, 'unavailable')
+            return None
+        except Exception as e:
+            xbmc.log(f'SkipIntro: Audio autodetect error for {show_title}: {str(e)}', xbmc.LOGERROR)
+            db.save_audio_detection_attempt(show_id, watched_count, 'error')
+            return None
+
+    @staticmethod
+    def _is_valid_audio_detection(detected):
+        if not detected:
+            return False
+        intro_start = detected.get('intro_start_time') or 0
+        intro_end = detected.get('intro_end_time')
+        return intro_end is not None and intro_end > intro_start
+
+    def _build_audio_detection_config(self, detected, chapters=None):
+        intro_start = detected.get('intro_start_time') or 0
+        intro_end = detected.get('intro_end_time')
+        outro_start = detected.get('outro_start_time')
+        config = {
+            'use_chapters': False,
+            'intro_start_chapter': None,
+            'intro_end_chapter': None,
+            'outro_start_chapter': None,
+            'intro_duration': None,
+            'intro_start_time': intro_start,
+            'intro_end_time': intro_end,
+            'outro_start_time': outro_start
+        }
+
+        chapter_config = self._audio_detection_chapter_config(intro_start, intro_end, outro_start, chapters=chapters)
+        if chapter_config:
+            config.update(chapter_config)
+        return config
+
+    def _audio_detection_chapter_config(self, intro_start, intro_end, outro_start, chapters=None):
+        """Map audio-detected times to chapter numbers when boundaries align."""
+        if chapters is None:
+            try:
+                chapters = self.getChapters()
+            except Exception:
+                chapters = []
+        if not chapters:
+            return None
+
+        intro_end_chapter = self._chapter_number_near_time(chapters, intro_end)
+        if intro_end_chapter is None:
+            return None
+
+        intro_start_chapter = self._chapter_number_near_time(chapters, intro_start)
+        if intro_start_chapter is None and intro_start == 0:
+            intro_start_chapter = 1
+
+        outro_start_chapter = None
+        if outro_start is not None:
+            outro_start_chapter = self._chapter_number_near_time(chapters, outro_start)
+
+        return {
+            'use_chapters': True,
+            'intro_start_chapter': intro_start_chapter,
+            'intro_end_chapter': intro_end_chapter,
+            'outro_start_chapter': outro_start_chapter,
+        }
+
+    @staticmethod
+    def _chapter_number_near_time(chapters, target_time, tolerance=2.0):
+        if target_time is None:
+            return None
+        best = None
+        best_delta = None
+        for index, chapter in enumerate(chapters):
+            chapter_time = chapter.get('time')
+            if chapter_time is None:
+                continue
+            delta = abs(float(chapter_time) - float(target_time))
+            if best_delta is None or delta < best_delta:
+                best = chapter.get('number') or index + 1
+                best_delta = delta
+        if best_delta is not None and best_delta <= tolerance:
+            return best
+        return None
 
     def find_intro_chapter(self, chapters):
         chapter_manager = ChapterManager()
@@ -676,6 +935,9 @@ class SkipIntroPlayer(xbmc.Player):
             self.show_from_start = False
             self.has_config = False
             self._skip_to_chapter = None
+            self._playing_file = None
+            self._max_playback_time = 0
+            self._playback_chapters = []
 
     def set_manual_times(self):
         """Prompt user for manual intro/outro times and save them"""
@@ -744,7 +1006,7 @@ def main():
             if monitor.waitForAbort(MONITOR_INTERVAL_SEC):
                 break
 
-            if player.isPlaying() and (player.timer_active or player.warning_timer_active or player.dismiss_timer_active):
+            if player.isPlaying():
                 try:
                     time = player.getTime()
                     player.onPlayBackTime(time)

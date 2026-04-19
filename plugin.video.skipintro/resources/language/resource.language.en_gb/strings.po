@@ -159,3 +159,11 @@ msgstr ""
 msgctxt "#32062"
 msgid "Time to skip from for outro in seconds (optional)"
 msgstr ""
+
+msgctxt "#32093"
+msgid "Automatically Detect Intros From Audio"
+msgstr ""
+
+msgctxt "#32094"
+msgid "After two watched episodes of a show, analyze episode audio and save detected intro/outro points"
+msgstr ""
