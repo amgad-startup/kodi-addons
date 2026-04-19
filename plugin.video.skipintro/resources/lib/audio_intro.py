@@ -455,7 +455,11 @@ class AudioIntroDetector:
 
         return None
 
-    def find_episode_candidates(self, selected_path: str) -> List[str]:
+    def find_episode_candidates(
+        self,
+        selected_path: str,
+        skip_first_episode: bool = False
+    ) -> List[str]:
         """Return selected episode plus nearby video files from the same folder."""
         if selected_path.endswith(('/', '\\')):
             directory = selected_path
@@ -480,6 +484,15 @@ class AudioIntroDetector:
             return [selected_path]
 
         selected_basename = selected_name.lower()
+        skipped_selected = False
+        if skip_first_episode and len(candidates) > 1:
+            first_candidate = candidates[0]
+            skipped_selected = (
+                bool(selected_name) and
+                self._basename(first_candidate).lower() == selected_basename
+            )
+            candidates = candidates[1:]
+
         selected_index = 0
         for index, candidate in enumerate(candidates):
             if self._basename(candidate).lower() == selected_basename:
@@ -492,7 +505,7 @@ class AudioIntroDetector:
             prefix = candidates[max(0, selected_index - needed):selected_index]
             window = prefix + window
 
-        if selected_name and selected_path not in window:
+        if selected_name and selected_path not in window and not skipped_selected:
             window.insert(0, selected_path)
 
         return window[:self.max_episodes]

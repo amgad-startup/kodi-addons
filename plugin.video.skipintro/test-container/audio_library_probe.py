@@ -213,6 +213,9 @@ def select_sample(args, mappings):
                 item['mapped_file'] = mapped_path
                 mapped_episodes.append(item)
 
+        if args.skip_first_episode and len(mapped_episodes) > 1:
+            mapped_episodes = mapped_episodes[1:]
+
         if len(mapped_episodes) < args.episodes_per_show:
             skipped[f'{bucket}:too_few_local_episodes'] += 1
             continue
@@ -418,6 +421,11 @@ def main(argv):
     parser.add_argument('--show-title', action='append', help='Exact show title to include; can be repeated')
     parser.add_argument('--shows-per-language', type=int, default=3)
     parser.add_argument('--episodes-per-show', type=int, default=3)
+    parser.add_argument(
+        '--skip-first-episode',
+        action='store_true',
+        help='Start show-level detection samples from episode 2 when available',
+    )
     parser.add_argument('--max-detector-episodes', type=int, default=None)
     parser.add_argument('--max-shows', type=int, default=4000)
     parser.add_argument('--max-episodes-per-show', type=int, default=12)

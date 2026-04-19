@@ -1370,6 +1370,20 @@ class TestAudioIntroDetector(unittest.TestCase):
         self.assertTrue(result[0].endswith('Show.S01E01.strm'))
         self.assertTrue(result[1].endswith('Show.S01E02.strm'))
 
+    def test_find_episode_candidates_can_skip_first_episode(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name in ['Show.S01E01.strm', 'Show.S01E02.strm', 'Show.S01E03.strm']:
+                open(os.path.join(tmpdir, name), 'w').close()
+
+            selected = os.path.join(tmpdir, 'Show.S01E01.strm')
+            detector = AudioIntroDetector(max_episodes=2)
+            result = detector.find_episode_candidates(selected, skip_first_episode=True)
+
+        self.assertEqual(len(result), 2)
+        self.assertTrue(result[0].endswith('Show.S01E02.strm'))
+        self.assertTrue(result[1].endswith('Show.S01E03.strm'))
+
     def test_find_episode_candidates_accepts_show_folder(self):
         from resources.lib.audio_intro import AudioIntroDetector
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1726,7 +1740,7 @@ class TestContextModule(unittest.TestCase):
         dialog.yesno.return_value = True
         initial_detector = MagicMock()
         fallback_detector = MagicMock()
-        initial_detector.find_episode_candidates.return_value = ['e1.mkv', 'e2.mkv']
+        initial_detector.find_episode_candidates.return_value = ['e2.mkv', 'e3.mkv']
         initial_detector.detect_show_intro.return_value = None
         fallback_detector.detect_show_intro.return_value = {
             'intro_start_time': 114,
@@ -1749,8 +1763,12 @@ class TestContextModule(unittest.TestCase):
                 {'backend': 'fingerprint', 'max_scan_seconds': 180},
             ]
         )
-        initial_detector.detect_show_intro.assert_called_once_with(['e1.mkv', 'e2.mkv'])
-        fallback_detector.detect_show_intro.assert_called_once_with(['e1.mkv', 'e2.mkv'])
+        initial_detector.find_episode_candidates.assert_called_once_with(
+            '/videos/e1.mkv',
+            skip_first_episode=True
+        )
+        initial_detector.detect_show_intro.assert_called_once_with(['e2.mkv', 'e3.mkv'])
+        fallback_detector.detect_show_intro.assert_called_once_with(['e2.mkv', 'e3.mkv'])
         self.assertEqual(result['intro_start_time'], 114)
         self.assertEqual(result['intro_end_time'], 150)
 

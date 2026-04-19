@@ -595,7 +595,10 @@ def get_audio_intro_detection(dialog, item):
             backend='fingerprint',
             max_scan_seconds=AUDIO_DETECTION_INITIAL_SCAN_SECONDS
         )
-        candidates = detector.find_episode_candidates(item['file'])
+        candidates = detector.find_episode_candidates(
+            item['file'],
+            skip_first_episode=True
+        )
         dialog.notification(
             'Skip Intro',
             f'Analyzing audio from {len(candidates)} episode(s)',
