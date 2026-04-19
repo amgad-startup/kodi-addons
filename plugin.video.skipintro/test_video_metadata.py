@@ -1713,11 +1713,46 @@ class TestContextModule(unittest.TestCase):
         with patch.object(context, 'AudioIntroDetector', return_value=fake_detector) as detector_cls:
             result = context.get_audio_intro_detection(dialog, {'file': '/videos/e1.mkv'})
 
-        detector_cls.assert_called_once_with(backend='fingerprint')
+        detector_cls.assert_called_once_with(backend='fingerprint', max_scan_seconds=90)
         self.assertEqual(result['intro_start_time'], 0)
         self.assertEqual(result['intro_end_time'], 263)
         self.assertEqual(result['source'], 'audio_detection')
         dialog.yesno.assert_called_once()
+
+    def test_get_audio_intro_detection_extends_scan_after_initial_miss(self):
+        import context
+
+        dialog = MagicMock()
+        dialog.yesno.return_value = True
+        initial_detector = MagicMock()
+        fallback_detector = MagicMock()
+        initial_detector.find_episode_candidates.return_value = ['e1.mkv', 'e2.mkv']
+        initial_detector.detect_show_intro.return_value = None
+        fallback_detector.detect_show_intro.return_value = {
+            'intro_start_time': 114,
+            'intro_end_time': 150,
+            'episode_count': 2,
+            'matching_episode_count': 2,
+        }
+
+        with patch.object(
+            context,
+            'AudioIntroDetector',
+            side_effect=[initial_detector, fallback_detector]
+        ) as detector_cls:
+            result = context.get_audio_intro_detection(dialog, {'file': '/videos/e1.mkv'})
+
+        self.assertEqual(
+            [call.kwargs for call in detector_cls.call_args_list],
+            [
+                {'backend': 'fingerprint', 'max_scan_seconds': 90},
+                {'backend': 'fingerprint', 'max_scan_seconds': 180},
+            ]
+        )
+        initial_detector.detect_show_intro.assert_called_once_with(['e1.mkv', 'e2.mkv'])
+        fallback_detector.detect_show_intro.assert_called_once_with(['e1.mkv', 'e2.mkv'])
+        self.assertEqual(result['intro_start_time'], 114)
+        self.assertEqual(result['intro_end_time'], 150)
 
     def test_get_audio_intro_detection_includes_outro(self):
         import context

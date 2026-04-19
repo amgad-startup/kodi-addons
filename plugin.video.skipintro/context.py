@@ -14,6 +14,8 @@ from resources.lib.audio_intro import AudioIntroDetectionError, AudioIntroDetect
 
 
 FENLIGHT_PLUGIN = 'plugin.video.fenlight'
+AUDIO_DETECTION_INITIAL_SCAN_SECONDS = 90
+AUDIO_DETECTION_FALLBACK_SCAN_SECONDS = 180
 ARABIC_NORMALIZE_MAP = {
     ord('\u0622'): '\u0627',
     ord('\u0623'): '\u0627',
@@ -589,7 +591,10 @@ def get_audio_intro_detection(dialog, item):
         return None
 
     try:
-        detector = AudioIntroDetector(backend='fingerprint')
+        detector = AudioIntroDetector(
+            backend='fingerprint',
+            max_scan_seconds=AUDIO_DETECTION_INITIAL_SCAN_SECONDS
+        )
         candidates = detector.find_episode_candidates(item['file'])
         dialog.notification(
             'Skip Intro',
@@ -598,6 +603,18 @@ def get_audio_intro_detection(dialog, item):
         )
 
         detected = detector.detect_show_intro(candidates)
+        if not detected:
+            dialog.notification(
+                'Skip Intro',
+                'No intro found in first scan; extending audio scan',
+                xbmcgui.NOTIFICATION_INFO
+            )
+            fallback_detector = AudioIntroDetector(
+                backend='fingerprint',
+                max_scan_seconds=AUDIO_DETECTION_FALLBACK_SCAN_SECONDS
+            )
+            detected = fallback_detector.detect_show_intro(candidates)
+
         if not detected:
             dialog.notification('Skip Intro', 'No common intro audio found', xbmcgui.NOTIFICATION_WARNING)
             return None
