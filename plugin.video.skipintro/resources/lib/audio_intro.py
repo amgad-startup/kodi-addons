@@ -19,6 +19,7 @@ SILENCE_LABELS = {'noise', 'noenergy', 'silence'}
 
 DEFAULT_SCAN_SECONDS = 10 * 60
 DEFAULT_MAX_EPISODES = 3
+DEFAULT_FINGERPRINT_MAX_EPISODES = 5
 DEFAULT_MIN_MUSIC_SECONDS = 2 * 60
 DEFAULT_MIN_SPEECH_SECONDS = 12
 DEFAULT_EPISODE_TOLERANCE_SECONDS = 25
@@ -54,7 +55,7 @@ class AudioIntroDetector:
     def __init__(
         self,
         max_scan_seconds: int = DEFAULT_SCAN_SECONDS,
-        max_episodes: int = DEFAULT_MAX_EPISODES,
+        max_episodes: Optional[int] = None,
         min_music_seconds: int = DEFAULT_MIN_MUSIC_SECONDS,
         min_speech_seconds: int = DEFAULT_MIN_SPEECH_SECONDS,
         episode_tolerance_seconds: int = DEFAULT_EPISODE_TOLERANCE_SECONDS,
@@ -72,6 +73,8 @@ class AudioIntroDetector:
         segmenter_factory: Optional[Callable[[], Callable[[str], Iterable[Tuple[str, float, float]]]]] = None,
     ):
         self.max_scan_seconds = max_scan_seconds
+        if max_episodes is None:
+            max_episodes = DEFAULT_FINGERPRINT_MAX_EPISODES if backend == 'fingerprint' else DEFAULT_MAX_EPISODES
         self.max_episodes = max_episodes
         self.min_music_seconds = min_music_seconds
         self.min_speech_seconds = min_speech_seconds

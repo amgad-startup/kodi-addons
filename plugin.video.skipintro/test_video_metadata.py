@@ -1019,6 +1019,58 @@ class TestAudioIntroDetector(unittest.TestCase):
         self.assertEqual(result['matching_episode_count'], 2)
         self.assertEqual(result['source'], 'audio_fingerprint')
 
+    def test_fingerprint_backend_defaults_to_five_episodes(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        detector = AudioIntroDetector(backend='fingerprint')
+        segment_detector = AudioIntroDetector()
+        explicit_detector = AudioIntroDetector(backend='fingerprint', max_episodes=3)
+
+        self.assertEqual(detector.max_episodes, 5)
+        self.assertEqual(segment_detector.max_episodes, 3)
+        self.assertEqual(explicit_detector.max_episodes, 3)
+
+    def test_detect_show_intro_by_fingerprint_checks_later_episode_pair_by_default(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        common = [
+            0xAAAAAAAAAAAAAAAA,
+            0xCCCCCCCCCCCCCCCC,
+            0xF0F0F0F0F0F0F0F0,
+            0x0F0F0F0F0F0F0F0F,
+        ]
+
+        def fingerprints(values):
+            return [{'time': index * 2, 'hash': value, 'rms': 1000} for index, value in enumerate(values)]
+
+        detector = AudioIntroDetector(
+            backend='fingerprint',
+            fingerprint_window_seconds=2,
+            fingerprint_min_common_seconds=6,
+            fingerprint_hamming_distance=0
+        )
+        detector._find_ffmpeg = MagicMock(return_value='ffmpeg')
+        detector._probe_duration = MagicMock(return_value=120)
+        detector._detect_outro_by_fingerprint = MagicMock(return_value=None)
+        detector._fingerprint_file = MagicMock(side_effect=[
+            fingerprints([0x1111111111111111, 0x2222222222222222]),
+            fingerprints([0x3333333333333333, 0x4444444444444444]),
+            fingerprints([0x5555555555555555, 0x6666666666666666]),
+            fingerprints(common + [0x7777777777777777]),
+            fingerprints(common + [0x8888888888888888]),
+        ])
+
+        result = detector.detect_show_intro(['e1.strm', 'e2.strm', 'e3.strm', 'e4.strm', 'e5.strm'])
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['intro_start_time'], 0)
+        self.assertEqual(result['intro_end_time'], 8)
+        self.assertEqual(
+            [d['file'] for d in result['episode_detections']],
+            ['e4.strm', 'e5.strm']
+        )
+        self.assertEqual(detector._fingerprint_file.call_count, 5)
+
     def test_detect_show_intro_by_fingerprint_populates_diagnostics(self):
         from resources.lib.audio_intro import AudioIntroDetector
 
