@@ -667,6 +667,77 @@ class TestSkipIntro(unittest.TestCase):
         attempt = self.player.db.get_audio_detection_attempt(show_id)
         self.assertEqual(attempt['status'], 'hit')
 
+    def test_run_audio_detection_saves_virtual_markers_for_show_episodes_without_chapters(self):
+        """Audio detection saves per-episode markers when media has no chapters"""
+        title = f'Virtual Chapter Show {uuid.uuid4().hex}'
+        show_id = self.player.db.get_show(title)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            episode_paths = []
+            for episode in range(1, 5):
+                path = os.path.join(tmpdir, f'Virtual.Chapter.Show.S01E{episode:02d}.mkv')
+                open(path, 'w').close()
+                episode_paths.append(path)
+
+            detector = MagicMock()
+            detector.find_episode_candidates.return_value = episode_paths[1:4]
+            detector.detect_show_intro.return_value = {
+                'intro_start_time': 3,
+                'intro_end_time': 77,
+                'outro_start_time': 1800,
+            }
+
+            with patch.object(default, 'AudioIntroDetector', return_value=detector):
+                self.player._run_audio_detection_for_show(
+                    self.player.db,
+                    show_id,
+                    title,
+                    episode_paths[2],
+                    2,
+                    chapters=[]
+                )
+
+        self.assertIsNone(self.player.db.get_episode_times(show_id, 1, 1))
+        for episode in (2, 3, 4):
+            config = self.player.db.get_episode_times(show_id, 1, episode)
+            self.assertIsNotNone(config)
+            self.assertFalse(config['use_chapters'])
+            self.assertEqual(config['intro_start_time'], 3)
+            self.assertEqual(config['intro_end_time'], 77)
+            self.assertEqual(config['outro_start_time'], 1800)
+            self.assertEqual(config['source'], 'audio_detection')
+
+    def test_audio_virtual_markers_do_not_overwrite_existing_episode_config(self):
+        """Automatic virtual markers preserve existing episode-specific config"""
+        title = f'Existing Episode Config {uuid.uuid4().hex}'
+        show_id = self.player.db.get_show(title)
+        self.player.db.save_episode_times(show_id, 1, 2, {
+            'intro_start_time': 10,
+            'intro_end_time': 20,
+            'outro_start_time': None,
+            'source': 'manual'
+        })
+
+        count = self.player._save_audio_detection_episode_markers(
+            self.player.db,
+            show_id,
+            ['/videos/Existing.Episode.Config.S01E02.mkv', '/videos/Existing.Episode.Config.S01E03.mkv'],
+            {
+                'intro_start_time': 0,
+                'intro_end_time': 80,
+                'outro_start_time': 1800,
+            }
+        )
+
+        self.assertEqual(count, 1)
+        existing = self.player.db.get_episode_times(show_id, 1, 2)
+        self.assertEqual(existing['intro_start_time'], 10)
+        self.assertEqual(existing['intro_end_time'], 20)
+        self.assertEqual(existing['source'], 'manual')
+        generated = self.player.db.get_episode_times(show_id, 1, 3)
+        self.assertEqual(generated['intro_start_time'], 0)
+        self.assertEqual(generated['intro_end_time'], 80)
+        self.assertEqual(generated['source'], 'audio_detection')
+
     def test_audio_detection_config_uses_chapters_when_times_align(self):
         """Audio-detected times keep timestamp fallback and add chapter numbers when aligned"""
         self.player.getChapters = MagicMock(return_value=[

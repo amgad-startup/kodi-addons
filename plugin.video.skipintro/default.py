@@ -11,8 +11,8 @@ from resources.lib.settings import Settings
 from resources.lib.chapters import ChapterManager
 from resources.lib.ui import PlayerUI
 from resources.lib.database import ShowDatabase
-from resources.lib.metadata import ShowMetadata
-from resources.lib.audio_intro import AudioIntroDetectionError, AudioIntroDetector
+from resources.lib.metadata import ShowMetadata, sanitize_path
+from resources.lib.audio_intro import AudioIntroDetectionError, AudioIntroDetector, VIDEO_EXTENSIONS
 
 addon = xbmcaddon.Addon()
 
@@ -771,11 +771,21 @@ class SkipIntroPlayer(xbmc.Player):
 
             config = self._build_audio_detection_config(detected, chapters=chapters)
             if db.save_show_config(show_id, config):
+                virtual_chapter_count = 0
+                if not chapters:
+                    episode_files = self._find_show_episode_files(selected_file, skip_first_episode=True)
+                    virtual_chapter_count = self._save_audio_detection_episode_markers(
+                        db,
+                        show_id,
+                        episode_files,
+                        config
+                    )
                 db.save_audio_detection_attempt(show_id, watched_count, 'hit')
                 xbmc.log(
                     f'SkipIntro: Audio autodetect saved config for {show_title}: '
                     f'intro {config.get("intro_start_time")}->{config.get("intro_end_time")}, '
-                    f'outro {config.get("outro_start_time")}',
+                    f'outro {config.get("outro_start_time")}, '
+                    f'virtual_episode_markers={virtual_chapter_count}',
                     xbmc.LOGINFO
                 )
                 return config
@@ -790,6 +800,90 @@ class SkipIntroPlayer(xbmc.Player):
             xbmc.log(f'SkipIntro: Audio autodetect error for {show_title}: {str(e)}', xbmc.LOGERROR)
             db.save_audio_detection_attempt(show_id, watched_count, 'error')
             return None
+
+    @staticmethod
+    def _find_show_episode_files(selected_file, skip_first_episode=False):
+        """Return all video files in the selected episode folder."""
+        slash = max(selected_file.rfind('/'), selected_file.rfind('\\'))
+        if slash < 0:
+            directory = ''
+            selected_name = selected_file
+        else:
+            directory = selected_file[:slash + 1]
+            selected_name = selected_file[slash + 1:]
+        if not directory:
+            return [selected_file]
+
+        try:
+            _dirs, files = xbmcvfs.listdir(directory)
+        except Exception as e:
+            xbmc.log(
+                f'SkipIntro: Could not list episode folder for virtual chapters '
+                f'{sanitize_path(selected_file)}: {str(e)}',
+                xbmc.LOGWARNING
+            )
+            return [selected_file]
+
+        episode_files = []
+        for filename in sorted(files, key=lambda value: value.lower()):
+            if filename.lower().endswith(VIDEO_EXTENSIONS):
+                episode_files.append(directory + filename)
+
+        if not episode_files:
+            return [selected_file]
+        if skip_first_episode and len(episode_files) > 1:
+            episode_files = episode_files[1:]
+
+        if selected_name and selected_file not in episode_files:
+            episode_files.append(selected_file)
+        return episode_files
+
+    def _save_audio_detection_episode_markers(self, db, show_id, episode_files, config):
+        """Save audio-detected times as per-episode virtual chapter markers."""
+        episode_markers = {
+            'intro_start_time': config.get('intro_start_time'),
+            'intro_end_time': config.get('intro_end_time'),
+            'outro_start_time': config.get('outro_start_time'),
+            'intro_start_chapter': None,
+            'intro_end_chapter': None,
+            'outro_start_chapter': None,
+            'source': 'audio_detection'
+        }
+        if episode_markers['intro_end_time'] is None:
+            return 0
+
+        saved_count = 0
+        metadata = ShowMetadata()
+        seen = set()
+        for episode_file in episode_files:
+            episode_info = metadata._parse_filename(episode_file)
+            if not episode_info:
+                continue
+            season = episode_info.get('season')
+            episode = episode_info.get('episode')
+            if season is None or episode is None:
+                continue
+            key = (season, episode)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            existing = db.get_episode_times(show_id, season, episode)
+            if existing and (
+                existing.get('intro_end_time') is not None or
+                existing.get('intro_end_chapter') is not None
+            ):
+                continue
+
+            if db.save_episode_times(show_id, season, episode, episode_markers):
+                saved_count += 1
+
+        if saved_count:
+            xbmc.log(
+                f'SkipIntro: Saved {saved_count} audio-detected virtual episode marker(s)',
+                xbmc.LOGINFO
+            )
+        return saved_count
 
     @staticmethod
     def _is_valid_audio_detection(detected):
