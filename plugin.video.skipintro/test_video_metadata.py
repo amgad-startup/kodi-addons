@@ -1173,6 +1173,34 @@ class TestAudioIntroDetector(unittest.TestCase):
         self.assertEqual(result['intro_start_time'], 2)
         self.assertEqual(result['intro_end_time'], 42)
 
+    def test_detect_show_intro_by_fingerprint_default_accepts_twenty_five_second_intro(self):
+        from resources.lib.audio_intro import AudioIntroDetector
+
+        common = [0x1000000000000000 + index for index in range(13)]
+
+        def fingerprints(values):
+            return [{'time': index * 2, 'hash': value, 'rms': 1000} for index, value in enumerate(values)]
+
+        detector = AudioIntroDetector(
+            backend='fingerprint',
+            fingerprint_window_seconds=2,
+            fingerprint_hamming_distance=0
+        )
+        detector._find_ffmpeg = MagicMock(return_value='ffmpeg')
+        detector._probe_duration = MagicMock(return_value=180)
+        detector._detect_outro_by_fingerprint = MagicMock(return_value=None)
+        detector._fingerprint_file = MagicMock(side_effect=[
+            fingerprints([0x1111111111111111] + common + [0x2222222222222222]),
+            fingerprints([0x3333333333333333] + common + [0x4444444444444444]),
+        ])
+
+        result = detector.detect_show_intro(['e1.mkv', 'e2.mkv'])
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['match_duration'], 26)
+        self.assertEqual(result['intro_start_time'], 2)
+        self.assertEqual(result['intro_end_time'], 28)
+
     def test_fingerprint_pcm_uses_configured_hop(self):
         from resources.lib.audio_intro import AudioIntroDetector
 
